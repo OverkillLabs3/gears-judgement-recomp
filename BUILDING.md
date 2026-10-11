@@ -68,6 +68,24 @@ CMake and Ninja must be on your `PATH`. (The Visual Studio installer can install
 
 `-Clean` deletes `generated\` and `out\` first for a from-scratch build.
 
+## Optional: DLSS and FSR upscalers (GPU plugin, switched off in this release)
+
+The upscalers are switched off in the game (`kTemporalUpscalers` in `src/gowj_quality.h`) and their libraries are not packed. The plugin still builds with them for development. The stock ReXGlue graphics plugin knows nothing about upscalers. The repository carries a patch set
+(`gpu\patches`) and the new plugin sources (`gpu\files`) that add them. To build with them, run this
+**before** `build.ps1`:
+
+```
+powershell -ExecutionPolicy Bypass -File scripts\build-gpu.ps1
+```
+
+It clones the ReXGlue SDK at the tested commit (`923c1a5`) into `out\gpu-build`, applies the patches,
+fetches the public NVIDIA DLSS and AMD FidelityFX headers, and builds `rexruntime.dll` and
+`rexgpu-xenos.dll` into `out\gpu`. The first run needs about 3 GB of disk space and 10 to 20 minutes.
+The same step copies the official `nvngx_dlss.dll` and the signed AMD FidelityFX loader and upscaler
+DLLs into `out\gpu`. `build.ps1` then packs the two plugin DLLs into the game exe (the vendor DLLs are not copied while the upscalers are off). Without this step the game
+builds and runs with the stock plugin; only the upscaler options do nothing. Add `-Dev` for the
+development tools (frame dumps, D3D12 debug layer).
+
 ## What the script does
 
 You can run the same steps by hand from a *x64 Native Tools Command Prompt for VS 2022*:

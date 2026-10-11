@@ -79,7 +79,7 @@ uint64_t FileHash(const std::filesystem::path& p, size_t n) {
 // Checkpoint write-back fix. The guest rewrites GearsCheckpointN.sav in place
 // (FILE_OPEN_IF, one write at offset 0, close, never an end-of-file set) right
 // after XamContentDelete - which on hardware empties the package first and here
-// fails with access denied. Measured 2026-09-25: a 164747-byte checkpoint written
+// fails with access denied. Measured: a 164747-byte checkpoint written
 // over a 183593-byte one left the file at 183593, i.e. 18846 bytes of the older
 // checkpoint trailing the new one, which the title reports as corrupted. On
 // close, trim the host file to where the guest's writes ended.
@@ -252,7 +252,7 @@ void Wrap(PPCContext& ctx, uint8_t* base) {
   }
   if constexpr (I == kSign) {
     // XeKeysConsolePrivateKeySign(hash[20], XE_CONSOLE_SIGNATURE* out) -> BOOL.
-    // Measured 2026-09-25: the runtime returns FALSE and leaves a zero signature.
+    // Measured: the runtime returns FALSE and leaves a zero signature.
     // The title signs every checkpoint on save and re-signs on load to compare,
     // so a failing signer makes every save it ever wrote read as "corrupted".
     // A console's key is fixed, so its signature is a pure function of the hash:

@@ -447,7 +447,10 @@ void Apply(IDXGISwapChain* sc) {
     if (g.failed) return;
     g.back_format = desc.Format;
   }
-  const bool smaa = REXCVAR_GET(gowj_smaa);
+  // A temporal upscaler already resolves edges; SMAA on top would only soften the picture. The plugin
+  // reports a running upscaler as "<name> <mode>: render WxH, output WxH"; a failure has no "render".
+  const std::string up_status = rex::cvar::GetFlagByName("gowj_upscale_status");
+  const bool smaa = REXCVAR_GET(gowj_smaa) && up_status.find(": render ") == std::string::npos;
   const bool easu = REXCVAR_GET(gowj_fsr_easu) && gw < ow;
   if (!MakeTex(g.inter, ow, oh, kColor, true)) return;
   if (smaa && (!MakeTex(g.edges, gw, gh, DXGI_FORMAT_R8G8_UNORM, true) ||
@@ -545,7 +548,7 @@ bool PatchSlot(void** vtable, size_t index, void* hook, void** orig) {
   return true;
 }
 
-// Measured 2026-09-25 11:46: the probe swap chain's vtable was patched, yet the
+// Measured 11:46: the probe swap chain's vtable was patched, yet the
 // runtime's Present never reached the hook - its swap chain uses another vtable.
 // So the swap chain the runtime actually creates is patched at creation, through
 // hooks on the factory it is created with.

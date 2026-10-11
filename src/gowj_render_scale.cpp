@@ -34,7 +34,7 @@ void LogOnce(bool& logged, const char* what, uint32_t from, uint32_t to) {
 // sub_82990A28 ends with `if (stored_width != 1280) { ... = 800x800 ... }` - a
 // stock-vs-nonstandard guard. Once the store is overridden that guard fires for
 // every custom resolution and puts the engine on its fallback path, so the
-// comparison has to be fed the pre-override value (measured 2026-09-24: with the
+// comparison has to be fed the pre-override value (measured with the
 // guard live, a 2560x1440 target showed the frame tiled H/720 times).
 uint32_t g_guest_width = 0;
 uint32_t g_guest_height = 0;

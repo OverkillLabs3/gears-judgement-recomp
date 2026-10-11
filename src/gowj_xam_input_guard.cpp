@@ -3,7 +3,7 @@
 // Guest XamInput* entry-point serializer, and the instrument that proves the
 // race it fixes.
 //
-// Measured 2026-09-25, two independent cdb captures of the same death:
+// Measured, two independent cdb captures of the same death:
 //   rexruntime!std::vector<rex::input::DeviceInfo>::clear  <-
 //   rexruntime!rex::input::InputSystem::RefreshDevices+0x970 <-
 //   rexruntime!rex::input::InputSystem::GetState+0x40 <-
@@ -319,6 +319,57 @@ void InstallXamInputGuard() {
   }
   REXLOG_INFO("XAMINPUTGUARD hooked {}/{} guest input entry points (lock={})", hits,
               kMaxTargets, g_lock_enabled);
+}
+
+}  // namespace rex::glue
+
+namespace {
+
+// The game checks the disc in the drive at startup. This port does not mount a disc drive (the game's
+// video decoder, which the disc movies need, crashes at mission start), so that check fails and the game
+// asks the system to show its "Disc Read Error" box. The game carries on without it, so the box is only
+// a startup popup that has to be dismissed. This replaces that one call with a parked thread and logs it once.
+void DiscErrorNoop(PPCContext& ctx, uint8_t* base) {
+  (void)base;
+  static std::atomic<bool> logged{false};
+  if (!logged.exchange(true)) {
+    REXLOG_INFO("DISCERR the game's 'Disc Read Error' box was suppressed (no disc drive is mounted by design)");
+  }
+  // The guest treats this call as one that never comes back (the runtime's own version shows the box and
+  // then exits the process), and the title shuts itself down if it does return. So only the box is removed:
+  // the calling thread is parked, which is the state the game runs in while the box is up, and every other
+  // thread carries on.
+  for (;;) Sleep(INFINITE);
+}
+
+}  // namespace
+
+namespace rex::glue {
+
+void InstallDiscErrorSilencer() {
+  static bool installed = false;
+  if (installed) return;
+  installed = true;
+  char gate[8]{};
+  if (GetEnvironmentVariableA("GOWJ_DISC_ERROR_UI", gate, sizeof(gate)) && std::strcmp(gate, "1") == 0) return;
+  HMODULE mod = GetModuleHandleA("rexruntime.dll");
+  if (!mod) return;
+  uint8_t* thunk = reinterpret_cast<uint8_t*>(GetProcAddress(mod, "__imp__XamShowDirtyDiscErrorUI"));
+  if (!thunk) {
+    REXLOG_WARN("DISCERR __imp__XamShowDirtyDiscErrorUI not exported, box not suppressed");
+    return;
+  }
+  DWORD old = 0;
+  if (!VirtualProtect(thunk, kThunkSize, PAGE_EXECUTE_READWRITE, &old)) return;
+  thunk[0] = 0xFF;
+  thunk[1] = 0x25;
+  std::memset(thunk + 2, 0, 4);
+  void* replacement = reinterpret_cast<void*>(&DiscErrorNoop);
+  std::memcpy(thunk + 6, &replacement, 8);
+  DWORD tmp = 0;
+  VirtualProtect(thunk, kThunkSize, old, &tmp);
+  FlushInstructionCache(GetCurrentProcess(), thunk, kThunkSize);
+  REXLOG_INFO("DISCERR disc error box silenced (thunk {:#x})", reinterpret_cast<uintptr_t>(thunk));
 }
 
 }  // namespace rex::glue

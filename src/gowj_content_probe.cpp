@@ -2,7 +2,7 @@
 //
 // XamContent* import shim.
 //
-// Measured 2026-09-24: ContentManager::OpenContent receives a 10-byte "path"
+// Measured: ContentManager::OpenContent receives a 10-byte "path"
 // that is live guest UE3 object data (floats + 0x7018xxxx pointers), never a
 // filename. rexruntime decodes content keys as UTF-8 and throws on a bad lead
 // byte, which terminates the process (see gowj_utf8_guard.h).
@@ -307,7 +307,7 @@ void EnsureCheckpointRoot(uint8_t* base, uint32_t root_ptr, uint32_t data_ptr,
 }
 
 // XamContentCreateEx for the GearsCheckpoint package, served here instead of by
-// the runtime. Measured 2026-09-25 07:29: the runtime's content manager never
+// the runtime. Measured 07:29: the runtime's content manager never
 // releases a package (its XamContentClose fails ERROR_FILE_NOT_FOUND on every
 // call), so by the title's third read-only open in the boot slot scan the open
 // fails, the title falls back to OPEN_ALWAYS, that completes ERROR_ALREADY_EXISTS
@@ -401,7 +401,7 @@ void ProbeWrap(PPCContext& ctx, uint8_t* base) {
                   ctx.r6.u32, ctx.r7.u32, ctx.r8.u32, ctx.r9.u32, ctx.r10.u32, hex);
     }
   }
-  // Save-corruption fix (measured 2026-09-24). XamContentCreateEx returns
+  // Save-corruption fix (measured). XamContentCreateEx returns
   // 0x3E5 = ERROR_IO_PENDING: the request is serviced by a deferred host worker
   // that re-reads the guest's XCONTENT_DATA descriptor LATER. The STALEARG lines
   // above prove that descriptor is mutated/recycled 1.4-8.6 s after the call, so
@@ -522,7 +522,7 @@ void ProbeWrap(PPCContext& ctx, uint8_t* base) {
   // (measured in every session log), so the corrupted state could never be
   // cleared. Do what the console does - remove the package's files - but move
   // them into a backup folder rather than destroying them.
-  // DISABLED: measured 2026-09-25 06:09, the title calls this on its own ~1 s
+  // DISABLED: measured 06:09, the title calls this on its own ~1 s
   // after every boot slot scan, not on the player's Overwrite choice, so
   // honouring it removed the live checkpoint every boot.
   if (false && deleting_checkpoints && ctx.r3.u32 != 0) {

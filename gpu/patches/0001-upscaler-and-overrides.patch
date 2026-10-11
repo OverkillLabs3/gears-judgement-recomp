@@ -1,0 +1,572 @@
+diff --git a/include/rex/graphics/d3d12/command_processor.h b/include/rex/graphics/d3d12/command_processor.h
+index 96d362b..8e7d40d 100644
+--- a/include/rex/graphics/d3d12/command_processor.h
++++ b/include/rex/graphics/d3d12/command_processor.h
+@@ -67,6 +67,14 @@ class D3D12CommandProcessor : public CommandProcessor {
+     return deferred_command_list_;
+   }
+ 
++  // Call after recording a DeferredCommandList::Callback that may have changed pipelines, root
++  // signatures or descriptor heaps: the next draw re-binds everything.
++  void InvalidateBindingsAfterExternalCommands() {
++    current_guest_pipeline_ = nullptr;
++    current_external_pipeline_ = nullptr;
++    current_graphics_root_signature_ = nullptr;
++    current_graphics_root_up_to_date_ = 0;
++  }
+   uint64_t GetCurrentSubmission() const { return submission_current_; }
+   uint64_t GetCompletedSubmission() const { return submission_completed_; }
+ 
+diff --git a/include/rex/graphics/d3d12/deferred_command_list.h b/include/rex/graphics/d3d12/deferred_command_list.h
+index 7f1eb7f..2e761c8 100644
+--- a/include/rex/graphics/d3d12/deferred_command_list.h
++++ b/include/rex/graphics/d3d12/deferred_command_list.h
+@@ -442,6 +442,17 @@ class DeferredCommandList {
+ 
+   void EndDebugMarker() { WriteCommand(Command::kEndDebugMarker, 0); }
+ 
++  // Runs fn(command_list, user) when the list is replayed onto the real command list, in order
++  // with everything recorded before and after it. The callback may record any commands; it must
++  // leave the list usable (the processor marks its cached bindings stale afterwards).
++  using CallbackFn = void (*)(ID3D12GraphicsCommandList* command_list, void* user);
++  void Callback(CallbackFn fn, void* user) {
++    auto& args = *reinterpret_cast<CallbackArguments*>(
++        WriteCommand(Command::kCallback, sizeof(CallbackArguments)));
++    args.fn = fn;
++    args.user = user;
++  }
++
+   void InsertDebugMarker(const char* label_name) {
+     size_t label_len = std::strlen(label_name);
+     uint8_t* args_ptr = reinterpret_cast<uint8_t*>(
+@@ -494,6 +505,7 @@ class DeferredCommandList {
+     kBeginDebugMarker,
+     kEndDebugMarker,
+     kInsertDebugMarker,
++    kCallback,
+   };
+ 
+   struct CommandHeader {
+@@ -556,6 +568,11 @@ class DeferredCommandList {
+     bool has_src_box;
+   };
+ 
++  struct CallbackArguments {
++    CallbackFn fn;
++    void* user;
++  };
++
+   struct D3DDispatchArguments {
+     UINT thread_group_count_x;
+     UINT thread_group_count_y;
+diff --git a/include/rex/graphics/d3d12/texture_cache.h b/include/rex/graphics/d3d12/texture_cache.h
+index 4d845c7..fae1448 100644
+--- a/include/rex/graphics/d3d12/texture_cache.h
++++ b/include/rex/graphics/d3d12/texture_cache.h
+@@ -113,6 +113,10 @@ class D3D12TextureCache final : public TextureCache {
+                                     D3D12_CPU_DESCRIPTOR_HANDLE handle);
+   uint32_t GetActiveTextureBindlessSRVIndex(const D3D12Shader::TextureBinding& host_shader_binding);
+ 
++  // Resource of the texture bound to a fetch constant (nullptr if none); sizes in host texels.
++  ID3D12Resource* GetActiveTextureResource(uint32_t fetch_constant_index, uint32_t* width,
++                                           uint32_t* height) const;
++
+   SamplerParameters GetSamplerParameters(const D3D12Shader::SamplerBinding& binding) const;
+   void WriteSampler(SamplerParameters parameters, D3D12_CPU_DESCRIPTOR_HANDLE handle) const;
+ 
+diff --git a/include/rex/graphics/pipeline/texture/cache.h b/include/rex/graphics/pipeline/texture/cache.h
+index d26cd4f..914ef19 100644
+--- a/include/rex/graphics/pipeline/texture/cache.h
++++ b/include/rex/graphics/pipeline/texture/cache.h
+@@ -450,6 +450,11 @@ class TextureCache {
+   static constexpr uint8_t kSwizzledSignsUnsigned =
+       uint8_t(xenos::TextureSign::kUnsigned) * uint8_t(0b01010101);
+ 
++  // The host texture bound to a fetch constant by the last RequestTextures (nullptr if none).
++  Texture* GetActiveTexture(uint32_t fetch_constant_index) const {
++    return texture_bindings_[fetch_constant_index].texture;
++  }
++
+   struct TextureBinding {
+     TextureKey key;
+     // Destination swizzle merged with guest to host format swizzle.
+diff --git a/src/filesystem/devices/host_path_device.cpp b/src/filesystem/devices/host_path_device.cpp
+index f68b79a..d32c3b4 100644
+--- a/src/filesystem/devices/host_path_device.cpp
++++ b/src/filesystem/devices/host_path_device.cpp
+@@ -12,6 +12,10 @@
+ #include <rex/filesystem/devices/host_path_entry.h>
+ 
+ #include <algorithm>
++#include <cctype>
++#include <cstdlib>
++#include <string>
++#include <vector>
+ 
+ #include <rex/filesystem.h>
+ #include <rex/filesystem/devices/host_path_device.h>
+@@ -21,6 +25,39 @@
+ 
+ namespace rex::filesystem {
+ 
++namespace {
++// GOWJ_VFS_OVERRIDES="guest/relative/path=C:\host\file;other=..." substitutes individual files of a
++// read-only game folder with files from elsewhere, without touching the game folder.
++std::string LowerSlashes(std::string s) {
++  for (char& c : s) {
++    if (c == '\\') c = '/';
++    c = char(std::tolower(static_cast<unsigned char>(c)));
++  }
++  return s;
++}
++const std::vector<std::pair<std::string, std::filesystem::path>>& FileOverrides() {
++  static const auto table = [] {
++    std::vector<std::pair<std::string, std::filesystem::path>> t;
++    const char* env = std::getenv("GOWJ_VFS_OVERRIDES");
++    if (!env || !*env) return t;
++    std::string all = env;
++    size_t pos = 0;
++    while (pos <= all.size()) {
++      size_t end = all.find(';', pos);
++      if (end == std::string::npos) end = all.size();
++      const std::string item = all.substr(pos, end - pos);
++      const size_t eq = item.find('=');
++      if (eq != std::string::npos && eq > 0) {
++        t.emplace_back(LowerSlashes(item.substr(0, eq)), std::filesystem::path(item.substr(eq + 1)));
++      }
++      pos = end + 1;
++    }
++    return t;
++  }();
++  return table;
++}
++}  // namespace
++
+ HostPathDevice::HostPathDevice(const std::string_view mount_path,
+                                const std::filesystem::path& host_path, bool read_only,
+                                bool allow_share_delete)
+@@ -116,8 +153,23 @@ Entry* HostPathDevice::ResolvePath(const std::string_view path) {
+ void HostPathDevice::PopulateEntry(HostPathEntry* parent_entry) {
+   auto child_infos = rex::filesystem::ListFiles(parent_entry->host_path());
+   for (auto& child_info : child_infos) {
+-    auto child = HostPathEntry::Create(this, parent_entry,
+-                                       parent_entry->host_path() / child_info.name, child_info);
++    std::filesystem::path child_host_path = parent_entry->host_path() / child_info.name;
++    if (read_only_ && !FileOverrides().empty() &&
++        child_info.type != rex::filesystem::FileInfo::Type::kDirectory) {
++      std::error_code rel_ec;
++      const std::string rel =
++          LowerSlashes(std::filesystem::relative(child_host_path, host_path_, rel_ec).generic_string());
++      for (const auto& ov : FileOverrides()) {
++        rex::filesystem::FileInfo ov_info;
++        if (ov.first == rel && rex::filesystem::GetInfo(ov.second, &ov_info)) {
++          ov_info.name = child_info.name;
++          child_host_path = ov.second;
++          child_info = ov_info;
++          break;
++        }
++      }
++    }
++    auto child = HostPathEntry::Create(this, parent_entry, child_host_path, child_info);
+     parent_entry->children_.push_back(std::unique_ptr<Entry>(child));
+ 
+     if (child_info.type == rex::filesystem::FileInfo::Type::kDirectory) {
+diff --git a/src/graphics/CMakeLists.txt b/src/graphics/CMakeLists.txt
+index 0d8f8af..6626df5 100644
+--- a/src/graphics/CMakeLists.txt
++++ b/src/graphics/CMakeLists.txt
+@@ -82,6 +82,10 @@ if(REXGLUE_USE_D3D12)
+         d3d12/texture_cache.cpp
+         d3d12/deferred_command_list.cpp
+         d3d12/pipeline_cache.cpp
++        d3d12/gowj_temporal.cpp
++        d3d12/gowj_dlss.cpp
++        d3d12/gowj_upscale.cpp
++        d3d12/gowj_fsr.cpp
+     )
+ endif()
+ 
+@@ -112,6 +116,34 @@ target_include_directories(rexgpu-xenos PRIVATE
+ 
+ target_compile_options(rexgpu-xenos PRIVATE -Wno-unused-variable)
+ 
++option(GOWJ_DEV_TOOLS "Frame tracing, dumps and a D3D12 debug-layer switch (development only)" OFF)
++if(GOWJ_DEV_TOOLS)
++    target_compile_definitions(rexgpu-xenos PRIVATE GOWJ_DEV_TOOLS=1)
++endif()
++
++# Optional AMD FidelityFX upscaler (FSR) support: public API headers only (loaded at run time).
++set(GOWJ_FFX_SDK "${REXGLUE_ROOT}/../ffx-sdk/Kits/FidelityFX" CACHE PATH "AMD FidelityFX SDK Kits/FidelityFX folder")
++if(WIN32 AND EXISTS "${GOWJ_FFX_SDK}/api/include/ffx_api.h")
++    target_include_directories(rexgpu-xenos PRIVATE "${GOWJ_FFX_SDK}/api/include"
++                               "${GOWJ_FFX_SDK}/upscalers/include")
++    target_compile_definitions(rexgpu-xenos PRIVATE GOWJ_HAS_FFX=1)
++    message(STATUS "FSR (FidelityFX API) support: ON (${GOWJ_FFX_SDK})")
++else()
++    message(STATUS "FSR (FidelityFX API) support: OFF")
++endif()
++
++# Optional NVIDIA DLSS (NGX) support: headers and import library come from the public NVIDIA/DLSS
++# repository checked out next to this tree. Nothing from NVIDIA ends up in the source tree.
++set(GOWJ_DLSS_SDK "${REXGLUE_ROOT}/../dlss-sdk" CACHE PATH "NVIDIA DLSS SDK folder")
++if(WIN32 AND EXISTS "${GOWJ_DLSS_SDK}/include/nvsdk_ngx.h")
++    target_include_directories(rexgpu-xenos PRIVATE "${GOWJ_DLSS_SDK}/include")
++    target_link_libraries(rexgpu-xenos PRIVATE "${GOWJ_DLSS_SDK}/lib/Windows_x86_64/x64/nvsdk_ngx_d.lib")
++    target_compile_definitions(rexgpu-xenos PRIVATE GOWJ_HAS_DLSS=1)
++    message(STATUS "DLSS (NGX) support: ON (${GOWJ_DLSS_SDK})")
++else()
++    message(STATUS "DLSS (NGX) support: OFF")
++endif()
++
+ rex_target_pch(rexgpu-xenos
+     <mutex>
+     <unordered_map>
+diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
+index 19874a5..fda0028 100644
+--- a/src/graphics/d3d12/command_processor.cpp
++++ b/src/graphics/d3d12/command_processor.cpp
+@@ -20,6 +20,9 @@
+ #include <rex/dbg.h>
+ #include <rex/perf/counter.h>
+ #include <rex/graphics/d3d12/command_processor.h>
++#include <rex/graphics/d3d12/gowj_temporal.h>
++#include <rex/graphics/d3d12/gowj_trace.h>
++#include <cstdlib>
+ #include <rex/graphics/d3d12/graphics_system.h>
+ #include <rex/graphics/d3d12/shader.h>
+ #include <rex/graphics/flags.h>
+@@ -1896,6 +1899,15 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
+   SCOPE_profile_cpu_f("gpu");
+   vertex_buffers_in_sync_[0] = 0;
+   vertex_buffers_in_sync_[1] = 0;
++#ifdef GOWJ_DEV_TOOLS
++  if (GowjTraceBeginFrame()) {
++    REXGPU_WARN("SWAP f={} front={:08X} {}x{} remaining={}", gowj_trace_frame.load(),
++                frontbuffer_ptr, frontbuffer_width, frontbuffer_height,
++                gowj_trace_remaining.load());
++    GowjTraceEndFrame();
++  }
++#endif
++  gowj::BeginFrame(*this, frontbuffer_ptr);
+ 
+   if (!graphics_system_)
+     return;
+@@ -1980,6 +1992,18 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
+     }
+   }
+ 
++  // DLSS / FSR: the finished guest frame is upscaled to the screen size and shown instead of it.
++  {
++    gowj::FinalImage upscaled;
++    if (gowj::UpscaleFinal(*this, swap_texture_resource, guest_output_width, guest_output_height,
++                           upscaled)) {
++      swap_texture_resource = upscaled.resource;
++      swap_texture_srv_desc.Format = DXGI_FORMAT_R10G10B10A2_UNORM;
++      guest_output_width = upscaled.w;
++      guest_output_height = upscaled.h;
++    }
++  }
++
+   system::X_VIDEO_MODE video_mode;
+   kernel::xboxkrnl::VdQueryVideoMode(&video_mode);
+   uint32_t display_width = std::max(uint32_t(1), uint32_t(video_mode.display_width));
+@@ -2246,6 +2270,8 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
+         // Need to submit all the commands before giving the image back to the
+         // presenter so it can submit its own commands for displaying it to the
+         // queue.
++        gowj::CaptureOutputIfRequested(*this, guest_output_resource,
++                                       ui::d3d12::D3D12Presenter::kGuestOutputInternalState);
+         SubmitBarriers();
+         EndSubmission(true);
+         return true;
+@@ -2327,6 +2353,51 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+   bool memexport_used_pixel = pixel_shader && (pixel_shader->memexport_eM_written() != 0);
+   bool memexport_used = memexport_used_vertex || memexport_used_pixel;
+ 
++  if (pixel_shader) {
++    gowj::NoteSceneDraw(
++        reinterpret_cast<const float*>(&regs.values[XE_GPU_REG_SHADER_CONSTANT_000_X]),
++        uint32_t(regs.Get<reg::RB_COLOR_INFO>().color_format), index_count);
++  }
++#ifdef GOWJ_DEV_TOOLS
++  if (GowjTraceActive() && pixel_shader) {
++    // One line per draw: shaders, primitive, targets and the textures the pixel shader samples.
++    uint32_t color0 = regs.Get<reg::RB_COLOR_INFO>().color_base;
++    uint32_t color_fmt = uint32_t(regs.Get<reg::RB_COLOR_INFO>().color_format);
++    uint32_t depth_base = regs.Get<reg::RB_DEPTH_INFO>().depth_base;
++    std::string tex;
++    uint32_t used = 0;
++    for (const auto& b : pixel_shader->texture_bindings()) used |= (1u << b.fetch_constant);
++    for (uint32_t i = 0; i < 32; ++i) {
++      if (!(used & (1u << i))) continue;
++      xenos::xe_gpu_texture_fetch_t tf = regs.GetTextureFetch(i);
++      tex += fmt::format(" tf{}={:08X}/{}x{}/f{}", i, uint32_t(tf.base_address) << 12,
++                         uint32_t(tf.size_2d.width) + 1, uint32_t(tf.size_2d.height) + 1,
++                         uint32_t(tf.format));
++    }
++    int vp_at = gowj::FindCameraMatrix(
++        reinterpret_cast<const float*>(&regs.values[XE_GPU_REG_SHADER_CONSTANT_000_X]));
++    REXGPU_WARN(
++        "DRAW f={} vs={:016X} ps={:016X} prim={} n={} rt0={:X}/f{} z={:X} edram_mode={} pitch={} "
++        "vp@{}{}",
++        gowj_trace_frame.load(), vertex_shader->ucode_data_hash(), pixel_shader->ucode_data_hash(),
++        uint32_t(primitive_type), index_count, color0, color_fmt, depth_base, uint32_t(edram_mode),
++        uint32_t(regs.Get<reg::RB_SURFACE_INFO>().surface_pitch), vp_at, tex);
++    // Post-process constants of the uber-post (camera blur) shaders: PS float constants c0..c33.
++    uint64_t h = pixel_shader->ucode_data_hash();
++    if (h == 0x0553EF2174B35836ull || h == 0x63E1C54E3C4C2596ull) {
++      for (uint32_t c = 3; c <= 13; ++c) {
++        const uint32_t base = XE_GPU_REG_SHADER_CONSTANT_000_X + 4 * (256 + c);
++        float v[4];
++        for (int k = 0; k < 4; ++k) {
++          uint32_t u = regs.values[base + k];
++          std::memcpy(&v[k], &u, 4);
++        }
++        REXGPU_WARN("  UBERPOST c{} = {:.6f} {:.6f} {:.6f} {:.6f}", c, v[0], v[1], v[2], v[3]);
++      }
++    }
++  }
++#endif
++
+   if (!BeginSubmission(true)) {
+     return false;
+   }
+@@ -2408,6 +2479,7 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+       vertex_shader->GetUsedTextureMaskAfterTranslation() |
+       (pixel_shader != nullptr ? pixel_shader->GetUsedTextureMaskAfterTranslation() : 0);
+   texture_cache_->RequestTextures(used_texture_mask);
++  gowj::OnDrawTextures(*this, *texture_cache_, regs, used_texture_mask);
+ 
+   // Bind the pipeline after configuring it and doing everything that may bind
+   // other pipelines.
+@@ -2462,12 +2534,36 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+   // Update viewport, scissor, blend factor and stencil reference.
+   UpdateFixedFunctionState(viewport_info, scissor, primitive_polygonal, normalized_depth_control);
+ 
++  // Temporal jitter: shifts the NDC offset of world-geometry draws in the scene surface only
++  // (the fixed-function viewport is unchanged).
++  draw_util::ViewportInfo ndc_viewport_info = viewport_info;
++  if (gowj::ShouldJitter(vertex_shader->constant_register_map().float_bitmap[0],
++                         regs.Get<reg::RB_SURFACE_INFO>().surface_pitch,
++                         uint32_t(regs.Get<reg::RB_COLOR_INFO>().color_format))) {
++    const uint32_t host_w = gowj::State().guest_w * draw_resolution_scale_x;
++    const uint32_t host_h = gowj::State().guest_h * draw_resolution_scale_y;
++    float j[2];
++    gowj::JitterNdc(host_w, host_h, j);
++    float fx, fy;
++    uint32_t rw, rh;
++    if (gowj::RenderScale(host_w, host_h, &fx, &fy, &rw, &rh)) {
++      // Rasterise into the top-left (fx*W, fy*H) region; the upscaler reconstructs the rest.
++      ndc_viewport_info.ndc_scale[0] *= fx;
++      ndc_viewport_info.ndc_scale[1] *= fy;
++      ndc_viewport_info.ndc_offset[0] = ndc_viewport_info.ndc_offset[0] * fx + (fx - 1.0f);
++      ndc_viewport_info.ndc_offset[1] = ndc_viewport_info.ndc_offset[1] * fy + (1.0f - fy);
++    }
++    ndc_viewport_info.ndc_offset[0] += j[0];
++    ndc_viewport_info.ndc_offset[1] += j[1];
++  }
++
+   // Update system constants before uploading them.
+   // TODO(Triang3l): With ROV, pass the disabled render target mask for safety.
+   UpdateSystemConstantValues(memexport_used, primitive_polygonal,
+                              primitive_processing_result.line_loop_closing_index,
+-                             primitive_processing_result.host_shader_index_endian, viewport_info,
+-                             used_texture_mask, normalized_depth_control, normalized_color_mask);
++                             primitive_processing_result.host_shader_index_endian,
++                             ndc_viewport_info, used_texture_mask, normalized_depth_control,
++                             normalized_color_mask);
+ 
+   // Update constant buffers, descriptors and root parameters.
+   if (!UpdateBindings(vertex_shader, pixel_shader, root_signature, memexport_used)) {
+diff --git a/src/graphics/d3d12/deferred_command_list.cpp b/src/graphics/d3d12/deferred_command_list.cpp
+index e6d6277..964c2bf 100644
+--- a/src/graphics/d3d12/deferred_command_list.cpp
++++ b/src/graphics/d3d12/deferred_command_list.cpp
+@@ -36,6 +36,8 @@ void DeferredCommandList::Execute(ID3D12GraphicsCommandList* command_list,
+   const uintmax_t* stream = command_stream_.data();
+   size_t stream_remaining = command_stream_.size();
+   ID3D12PipelineState* current_pipeline_state = nullptr;
++  ID3D12DescriptorHeap* current_heaps[2] = {};
++  UINT current_heap_count = 0;
+   while (stream_remaining != 0) {
+     const CommandHeader& header = *reinterpret_cast<const CommandHeader*>(stream);
+     stream += kCommandHeaderSizeElements;
+@@ -229,6 +231,8 @@ void DeferredCommandList::Execute(ID3D12GraphicsCommandList* command_list,
+           descriptor_heaps[num_descriptor_heaps++] = args.sampler_descriptor_heap;
+         }
+         command_list->SetDescriptorHeaps(num_descriptor_heaps, descriptor_heaps);
++        current_heap_count = num_descriptor_heaps;
++        std::memcpy(current_heaps, descriptor_heaps, sizeof(current_heaps));
+       } break;
+       case Command::kD3DSetPipelineState: {
+         current_pipeline_state = *reinterpret_cast<ID3D12PipelineState* const*>(stream);
+@@ -262,6 +266,13 @@ void DeferredCommandList::Execute(ID3D12GraphicsCommandList* command_list,
+       case Command::kEndDebugMarker: {
+         command_list->EndEvent();
+       } break;
++      case Command::kCallback: {
++        auto& args = *reinterpret_cast<const CallbackArguments*>(stream);
++        args.fn(command_list, args.user);
++        // The callback may have bound other descriptor heaps or pipelines.
++        if (current_heap_count) command_list->SetDescriptorHeaps(current_heap_count, current_heaps);
++        current_pipeline_state = nullptr;
++      } break;
+       case Command::kInsertDebugMarker: {
+         auto& args = *reinterpret_cast<const DebugMarkerHeader*>(stream);
+         const char* label_name = reinterpret_cast<const char*>(
+diff --git a/src/graphics/d3d12/render_target_cache.cpp b/src/graphics/d3d12/render_target_cache.cpp
+index dd321a5..a946687 100644
+--- a/src/graphics/d3d12/render_target_cache.cpp
++++ b/src/graphics/d3d12/render_target_cache.cpp
+@@ -25,7 +25,10 @@
+ #include <rex/cvar.h>
+ #include <rex/graphics/d3d12/command_processor.h>
+ #include <rex/graphics/d3d12/deferred_command_list.h>
++#include <rex/graphics/d3d12/gowj_temporal.h>
++#include <rex/graphics/d3d12/gowj_trace.h>
+ #include <rex/graphics/d3d12/render_target_cache.h>
++#include <cstdlib>
+ #include <rex/graphics/d3d12/texture_cache.h>
+ #include <rex/graphics/flags.h>
+ #include <rex/graphics/format/dxbc.h>
+@@ -1180,6 +1183,41 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
+     return true;
+   }
+ 
++#ifdef GOWJ_DEV_TOOLS
++  // gowj_trace.now: log every resolve for the next few frames.
++  {
++    if (GowjTraceActive()) {
++      uint32_t f = gowj_trace_frame.load();
++      {
++        REXGPU_WARN(
++            "RESOLVE f={} dst={:08X} len={:X} {}x{} src={} depth={} fmt={} msaa={} dstfmt={} "
++            "cpy={} clr_d={} clr_c={} scale={}x{}",
++            f, resolve_info.copy_dest_base, resolve_info.copy_dest_extent_length,
++            resolve_info.coordinate_info.width_div_8 * 8, resolve_info.height_div_8 * 8,
++            uint32_t(resolve_info.rb_copy_control.copy_src_select),
++            uint32_t(resolve_info.IsCopyingDepth()),
++            uint32_t(resolve_info.IsCopyingDepth() ? resolve_info.depth_edram_info.format
++                                                   : resolve_info.color_edram_info.format),
++            uint32_t(resolve_info.IsCopyingDepth() ? resolve_info.depth_edram_info.msaa_samples
++                                                   : resolve_info.color_edram_info.msaa_samples),
++            uint32_t(resolve_info.copy_dest_info.copy_dest_format),
++            uint32_t(resolve_info.copy_dest_extent_length != 0),
++            uint32_t(resolve_info.IsClearingDepth()), uint32_t(resolve_info.IsClearingColor()),
++            uint32_t(resolve_info.coordinate_info.draw_resolution_scale_x),
++            uint32_t(resolve_info.coordinate_info.draw_resolution_scale_y));
++      }
++    }
++  }
++#endif
++
++  if (resolve_info.copy_dest_extent_length) {
++    gowj::State().scale_x = resolve_info.coordinate_info.draw_resolution_scale_x;
++    gowj::State().scale_y = resolve_info.coordinate_info.draw_resolution_scale_y;
++    gowj::NoteResolve(resolve_info.IsCopyingDepth(), resolve_info.copy_dest_base,
++                      resolve_info.coordinate_info.width_div_8 * 8, resolve_info.height_div_8 * 8,
++                      uint32_t(resolve_info.copy_dest_info.copy_dest_format));
++  }
++
+   DeferredCommandList& command_list = command_processor_.GetDeferredCommandList();
+ 
+   // Copying.
+diff --git a/src/graphics/d3d12/texture_cache.cpp b/src/graphics/d3d12/texture_cache.cpp
+index 2be0e8e..7c8b752 100644
+--- a/src/graphics/d3d12/texture_cache.cpp
++++ b/src/graphics/d3d12/texture_cache.cpp
+@@ -877,6 +877,20 @@ void D3D12TextureCache::WriteActiveTextureBindfulSRV(
+   }
+ }
+ 
++ID3D12Resource* D3D12TextureCache::GetActiveTextureResource(uint32_t fetch_constant_index,
++                                                            uint32_t* width,
++                                                            uint32_t* height) const {
++  Texture* texture = GetActiveTexture(fetch_constant_index);
++  if (!texture) return nullptr;
++  ID3D12Resource* resource = static_cast<D3D12Texture*>(texture)->resource();
++  if (resource) {
++    D3D12_RESOURCE_DESC desc = resource->GetDesc();
++    if (width) *width = uint32_t(desc.Width);
++    if (height) *height = desc.Height;
++  }
++  return resource;
++}
++
+ uint32_t D3D12TextureCache::GetActiveTextureBindlessSRVIndex(
+     const D3D12Shader::TextureBinding& host_shader_binding) {
+   assert_true(bindless_resources_used_);
+@@ -1544,6 +1558,12 @@ std::unique_ptr<TextureCache::Texture> D3D12TextureCache::CreateTexture(TextureK
+   // Untiling through a buffer instead of using unordered access because copying
+   // is not done that often.
+   desc.Flags = D3D12_RESOURCE_FLAG_NONE;
++  if ((desc.Format == DXGI_FORMAT_R10G10B10A2_UNORM ||
++       desc.Format == DXGI_FORMAT_R10G10B10A2_TYPELESS) &&
++      desc.Width >= 1024 && desc.Height >= 512) {
++    // The scene colour resolve target: the temporal upscaler writes its result back into it.
++    desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
++  }
+   const ui::d3d12::D3D12Provider& provider = command_processor_.GetD3D12Provider();
+   ID3D12Device* device = provider.GetDevice();
+   // Assuming untiling will be the next operation.
+diff --git a/src/ui/d3d12/d3d12_provider.cpp b/src/ui/d3d12/d3d12_provider.cpp
+index bf8252b..c0ff0ff 100644
+--- a/src/ui/d3d12/d3d12_provider.cpp
++++ b/src/ui/d3d12/d3d12_provider.cpp
+@@ -305,7 +305,55 @@ bool D3D12Provider::Initialize() {
+ 
+   // Create the Direct3D 12 device.
+   ID3D12Device* device;
+-  if (FAILED(pfn_d3d12_create_device_(adapter, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device)))) {
++#ifdef GOWJ_DEV_TOOLS
++  // GOWJ_D3D12_DEBUG=1: enable the debug layer (messages are logged through the info queue).
++  const bool gowj_debug_layer = [] {
++    const char* e = std::getenv("GOWJ_D3D12_DEBUG");
++    return e && *e == '1';
++  }();
++  if (gowj_debug_layer) {
++    typedef HRESULT(WINAPI * PFN_GetDebugInterface)(REFIID, void**);
++    auto get_debug = reinterpret_cast<PFN_GetDebugInterface>(
++        GetProcAddress(library_d3d12_, "D3D12GetDebugInterface"));
++    ID3D12Debug* debug = nullptr;
++    if (get_debug && SUCCEEDED(get_debug(IID_PPV_ARGS(&debug)))) {
++      debug->EnableDebugLayer();
++      debug->Release();
++      REXGPU_WARN("D3D12 debug layer enabled");
++    }
++  }
++#else
++  const bool gowj_debug_layer = false;
++#endif
++  // Prefer feature level 12_x (required by vendor upscalers such as DLSS), fall back to 11_0.
++  D3D_FEATURE_LEVEL chosen_level = D3D_FEATURE_LEVEL_12_1;
++  HRESULT create_hr = E_FAIL;
++  for (D3D_FEATURE_LEVEL level :
++       {D3D_FEATURE_LEVEL_12_1, D3D_FEATURE_LEVEL_12_0, D3D_FEATURE_LEVEL_11_0}) {
++    create_hr = pfn_d3d12_create_device_(adapter, level, IID_PPV_ARGS(&device));
++    if (SUCCEEDED(create_hr)) {
++      chosen_level = level;
++      break;
++    }
++  }
++  REXGPU_INFO("D3D12 device feature level 0x{:X}", uint32_t(chosen_level));
++#ifdef GOWJ_DEV_TOOLS
++  if (gowj_debug_layer && SUCCEEDED(create_hr)) {
++    ID3D12InfoQueue1* iq1 = nullptr;
++    if (SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&iq1)))) {
++      DWORD cookie = 0;
++      iq1->RegisterMessageCallback(
++          [](D3D12_MESSAGE_CATEGORY, D3D12_MESSAGE_SEVERITY sev, D3D12_MESSAGE_ID id,
++             LPCSTR desc, void*) {
++            if (sev <= D3D12_MESSAGE_SEVERITY_WARNING)
++              REXGPU_WARN("D3D12 debug [{}] {}", uint32_t(id), desc);
++          },
++          D3D12_MESSAGE_CALLBACK_FLAG_NONE, nullptr, &cookie);
++      iq1->Release();
++    }
++  }
++#endif
++  if (FAILED(create_hr)) {
+     REXLOG_ERROR("Failed to create a Direct3D 12 feature level 11_0 device");
+     adapter->Release();
+     dxgi_factory->Release();

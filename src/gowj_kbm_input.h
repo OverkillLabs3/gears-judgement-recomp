@@ -4,7 +4,7 @@
 // driver registered through RuntimeConfig::input_factory on top of
 // CreateDefaultInputSystem() crash InputSystem::RefreshDevices, because that
 // helper has already run Setup() and AddDriver() afterwards leaves the
-// per-driver bookkeeping pointing at uninitialised heap. Measured 2026-09-24
+// per-driver bookkeeping pointing at uninitialised heap. Measured
 // under cdb: at vector<DeviceInfo>::clear+0x61 (RefreshDevices+0x970 <-
 // GetState+0x40 <- XamInputGetState_entry) rcx=0 with
 // rax=baadf00d`00000010 rdx=baadf00d`00000011, and the same race surfaces as
@@ -72,7 +72,7 @@ class GowjKbmInputDriver final : public InputDriver,
     // recomputed there. Calling ApplyMouseCapture here re-applied the stale
     // flag from OnWindowAvailable (where HasFocus() is still false during
     // window creation), so a window focused after boot never captured the
-    // pointer - measured 2026-09-24: three "capture -> OFF" transitions, zero
+    // pointer - measured three "capture -> OFF" transitions, zero
     // ON, KBMRATE cap=0 for the whole session.
     UpdateCapture();
   }

@@ -35,7 +35,7 @@ seconds longer because the exe unpacks its files into `%LOCALAPPDATA%\GearsOfWar
 Your settings, saves and logs are kept in the folder you put the exe in.
 
 To change graphics settings before playing, start **`Graphics Settings.exe`**. It has quality level,
-internal resolution, texture filtering, anti-aliasing, FSR, frame limit, mouse sensitivity and more,
+texture filtering, anti-aliasing, FSR, frame limit, mouse sensitivity and more,
 and a **Play** button. The same settings are in the game under **F4**.
 
 ### Requirements
@@ -54,11 +54,12 @@ and a **Play** button. The same settings are in the game under **F4**.
 
 | | |
 |---|---|
-| **Keyboard and mouse** | Full keyboard and mouse controls with raw mouse look: no smoothing, no acceleration, no "sliding", frame-rate independent. Menus work with the mouse. Xbox and other controllers work too. |
+| **Keyboard and mouse** | Real keyboard and mouse input into the game's own controls (no gamepad emulation in play), fully rebindable, with raw mouse look: no smoothing, no acceleration, frame-rate independent. Menus work with the mouse and show keyboard prompts. Xbox and other controllers work too. |
 | **Frame limiter and unlock** | Default 60 fps with evenly spaced frames. Set **Frame limit: Unlocked** in the settings window for a fully unlocked frame rate (it also turns vsync off). **F8** switches the limiter off and on in game. The game's own 62 fps cap is lifted when unlocked. |
 | **FPS counter** | **F9** shows fps, frame time, 1% low and the current quality level. |
 | **Settings menu** | **F4** opens the settings menu: every option below can be changed in game and is saved. |
 | **SMAA + FSR** | SMAA anti-aliasing and AMD FSR 1.0 upscaling/sharpening of the final image, each switchable. |
+| **Lighter Low level** | Only on the **Low** quality level, the engine's heaviest effects (dynamic lights and shadows, decals, bloom, depth of field, ambient occlusion and similar) are turned off to help weak graphics cards and handhelds. Medium and High are never touched, and the game folder is not modified. It can be switched off in Graphics Settings. |
 | **Automatic quality** | Low / Medium / High chosen from your GPU, lowered for the next launch if 60 fps is not held. |
 | **Shader and pipeline cache** | Compiled graphics pipelines are remembered on disk, so each area stutters only the first time. |
 | **Cleaner image** | Film grain, motion blur and the game's own FXAA are off by default; community resolution-scaling fix applied. |
@@ -68,53 +69,44 @@ Everything is explained in detail, with every setting name, in **[docs/FEATURES.
 
 ## Controls
 
-The game was made for a gamepad, so every keyboard and mouse input below drives one gamepad button
-or stick. A controller still works too (Xbox pads, and anything SDL recognises).
+Keyboard and mouse play goes straight into the game's own input system: it receives real key and
+mouse events, so its aiming, cover and weapon logic behave exactly as with a controller. A
+controller still works too (Xbox pads, and anything SDL recognises); the game switches between them
+as you use them.
 
-| Gamepad | Keyboard / mouse | What it does in the game |
-|---|---|---|
-| **Left stick** | **W A S D** | Move; move along cover |
-| **Right stick** | **Mouse movement** | Look and aim |
-| **Right trigger (RT)** | **Left mouse button** | Fire |
-| **Left trigger (LT)** | **Right mouse button** | Aim down the sights (hold) |
-| **A** | **Space**, **E** or **Enter** | The context button: take cover, interact, use, pick up weapons and ammo, revive a teammate; **Enter** also accepts in menus |
-| **B** | **Ctrl** (hold), **V** | Crouch (hold Ctrl); execute a downed enemy (V) |
-| **X** | **R** | Reload; hold to rev the chainsaw |
-| **Y** | **Mouse wheel** (scroll either way) | Swap between your weapons |
-| **Left bumper (LB)** | **Q** | Spot and mark enemies and objects |
-| **Right bumper (RB)** | **F** | Melee; vault over cover |
-| **Left stick click (L3)** | **Z** | Walk (slow movement) |
-| **Right stick click (R3)** | not assigned | |
-| **D-pad** | **Arrow keys** | Menu navigation |
-| **Start** | **Escape** | Pause menu |
-| **Back** | **Tab** | Objectives and scoreboard |
-| **Guide** | not assigned | |
+| Action | Default keys |
+|---|---|
+| Move | **W A S D** |
+| Look and aim | **Mouse movement** |
+| Fire / aim down the sights | **Left mouse button** / **Right mouse button** (hold) |
+| Cover, vault, roll, sprint (hold) | **Space** |
+| Pick up weapons and ammo, revive, use | **E** |
+| Crouch | **Left Ctrl** or **C** |
+| Melee, execute a downed enemy | **F** or **V** |
+| Reload (hold to rev the chainsaw) | **R** or mouse button 4 |
+| Zoom | **T** or middle mouse button |
+| Swap weapons | **1**, or the **mouse wheel** |
+| Grenade | **2** |
+| Weapon slots | **3**, **4** |
+| Look at a point of interest | **Q** |
+| Tactical command | **H** |
+| Walk (slow) | **Z** |
+| Pause | **Escape** |
+| Scoreboard | **/** |
 
-Not available on the keyboard because the console game has no gamepad button for them: weapon
-slots 1 to 4, the scope toggle (middle mouse), push-to-talk and chat. Weapon swapping is the
-mouse wheel only.
+Every one of these can be changed in **Graphics Settings.exe** (the **Key bindings** button: click an
+action, then press the new key or mouse button; right-click adds a second key) or by hand in
+`config/gowj.toml`, for example `bind_reload = "R,ThumbMouseButton"`. The list of setting names is
+in the file's Controls section. A key can only do one thing: a key used elsewhere moves to the
+action you give it.
 
 **In menus** the game has no cursor, so the mouse drives the selection: scroll the **wheel** to move
-up and down, **move the mouse** to step in that direction, **left click** to accept (A) and
-**right click** to go back (B). **Enter** accepts and **Escape** is Start.
-
-Every key above can be changed in the F4 menu or in `config/gowj.toml`, for example
-`keybind_x = "R"` or `keybind_a = "Space,E,Return"` (several keys can share one button).
-The setting names are `keybind_a`, `keybind_b`, `keybind_x`, `keybind_y`,
-`keybind_left_shoulder`, `keybind_right_shoulder`, `keybind_left_trigger`, `keybind_right_trigger`,
-`keybind_lstick_press`, `keybind_rstick_press`, `keybind_lstick_up` (and down, left, right),
-`keybind_dpad_up` (and down, left, right), `keybind_start`, `keybind_back`.
-
-### Keys added by this project
-
-| Key | What it does |
-|---|---|
-| **F4** | Settings menu. The backtick key (`` ` ``) opens the console |
-| **F8** | Frame limiter: switch between unlocked and the limit (60 fps by default) |
-| **F9** | FPS counter on/off |
-| **F11 / F12** | Mouse sensitivity down / up by 20% (the new value is written to the log) |
-| **Insert** or **F1** | Release / capture the mouse pointer |
-| F3 | Performance overlay |
+up and down, **move the mouse** to step in that direction, **left click** to accept and **right
+click** to go back. **Enter** accepts, **Backspace** goes back and **Escape** is Start. The button
+prompts in menus show keyboard names such as `[Enter]` and `[Esc]` unless a controller is
+connected when the game starts (setting `gowj_prompts`: auto, keyboard or controller). The small
+button pictures in some in-game hints are part of the game's artwork and still show controller
+buttons.
 
 ## Known issues
 
@@ -134,7 +126,8 @@ The setting names are `keybind_a`, `keybind_b`, `keybind_x`, `keybind_y`,
 - **Menus have no mouse cursor.** The game was not designed for one; the mouse moves the selection.
 - **The settings menu (F4) pauses SMAA/FSR while it is open**, so the picture looks softer until you close it.
 - Thin, distant geometry (antennas, wires) can shimmer, because there is no temporal anti-aliasing.
-- Internal resolution above 2x (2560x1440) is not supported and breaks the picture.
+- The game renders at 720p on every quality level (1440p was removed because it was too heavy for most PCs).
+- DLSS and FSR 3.1/4 temporal upscaling is not in this release. It flickered while moving at the render sizes the game can draw, so it is paused until that is fixed.
 - Windows only.
 
 ## Building from source
@@ -166,5 +159,7 @@ cover the game itself, which belongs to its owners and is not included.
 - [XenonRecomp](https://github.com/hedge-dev/XenonRecomp) for the idea and the recompilation approach.
 - AMD FidelityFX Super Resolution 1.0 and SMAA (Jimenez et al.), see
   [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt).
+- The Low level engine settings follow the community low-end "Coalesced_INT" mod for Xenia from ModDB. The
+  values are applied to your own game files at run time; no game file and no file of that mod is shipped.
 - The xenia-canary community patch set for this title (film grain, FXAA and resolution-scaling
   fixes), re-implemented here as switchable settings.

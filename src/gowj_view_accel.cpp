@@ -18,6 +18,7 @@
 // parameter from the FFrame), then the axis is restored and the timer held at 0.
 
 #include "gowj_view_accel.h"
+#include "gowj_native_input.h"
 
 #include <windows.h>
 
@@ -25,6 +26,9 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
+#include <string>
+#include <unordered_set>
 
 #include <rex/cvar.h>
 #include <rex/logging.h>
@@ -85,6 +89,8 @@ uint32_t LoadRaw(uint8_t* base, uint32_t addr) {
 
 void StoreRaw(uint8_t* base, uint32_t addr, uint32_t v) { std::memcpy(base + addr, &v, 4); }
 
+std::atomic<uint32_t> g_gp_samples{0}, g_gp_set_entry{0}, g_gp_set_after{0};
+
 void Peak(std::atomic<float>& slot, float v) {
   v = std::fabs(v);
   float prev = slot.load(std::memory_order_relaxed);
@@ -104,19 +110,69 @@ void MaybeReport() {
     return;
   }
   REXLOG_INFO("VIEWACCEL aTurn pre={:.1f} post={:.1f} aLookUp pre={:.1f} post={:.1f} "
-              "calls={}x{} strip={}",
+              "calls={}x{} strip={} gamepad-flag set: at entry {}/{} after engine code {}",
               g_peak[0][0].exchange(0), g_peak[0][1].exchange(0), g_peak[1][0].exchange(0),
               g_peak[1][1].exchange(0), g_calls[0].exchange(0), g_calls[1].exchange(0),
-              !REXCVAR_GET(mnk_view_accel) && GowjRawLookLive());
+              !REXCVAR_GET(mnk_view_accel) && GowjRawLookLive(), g_gp_set_entry.exchange(0), g_gp_samples.load(),
+              g_gp_set_after.exchange(0));
+  g_gp_samples.store(0);
+}
+
+
+// One-shot layout probe for the native keyboard/mouse path (dev measurement): the player input
+// object's bitfield dword (bUsingGamepad) sits at +228, right before LastAxisKeyName.
+void DumpObject(uint8_t* base, uint32_t self) {
+  static std::mutex mu;
+  static std::unordered_set<uint32_t> seen;
+  std::lock_guard<std::mutex> l(mu);
+  if (!seen.insert(self).second) return;
+  std::string line;
+  char buf[16];
+  for (uint32_t off = 0; off < 0x60; off += 4) {
+    std::snprintf(buf, sizeof(buf), "%08X ", __builtin_bswap32(LoadRaw(base, self + off)));
+    line += buf;
+  }
+  REXLOG_INFO("NATIVEINPUT object 0x{:08X} head: {} | aBaseY={:.2f} aTurn={:.2f} thread={}", self, line,
+              LoadF(base, self + 256), LoadF(base, self + 276), GetCurrentThreadId());
+}
+
+void ProbeSelfOnce(uint8_t* base, uint32_t self) {
+  static std::atomic<bool> done{false};
+  if (!self) return;
+  DumpObject(base, self);
+  {
+    static std::atomic<uint32_t> last{0xFFFFFFFFu};
+    const uint32_t w = __builtin_bswap32(LoadRaw(base, self + 228));
+    const uint32_t prev = last.exchange(w);
+    static std::atomic<int> flips{0};
+    if (prev != w && prev != 0xFFFFFFFFu && flips.fetch_add(1) < 20) {
+      REXLOG_INFO("NATIVEINPUT flags +228 0x{:08X} -> 0x{:08X} lastaxis={}", prev, w,
+                  __builtin_bswap32(LoadRaw(base, self + 232)));
+    }
+  }
+  if (done.exchange(true)) return;
+  rex::glue::NativeInputStartNameScan(base);
+  REXLOG_INFO("NATIVEINPUT player input object 0x{:08X} vtbl 0x{:08X} flags +228 0x{:08X}", self,
+              __builtin_bswap32(LoadRaw(base, self)), __builtin_bswap32(LoadRaw(base, self + 228)));
+  rex::glue::NativeInputStartNameScan(base);
 }
 
 template <int kAxis, uint32_t kAxisOff, uint32_t kTimerOff, PPCFunc** kOrig>
 void Hook(PPCContext& ctx, uint8_t* base) {
   const uint32_t self = ctx.r3.u32;
+  ProbeSelfOnce(base, self);
   const bool strip = self && !REXCVAR_GET(mnk_view_accel) && GowjRawLookLive();
   const uint32_t raw = self ? LoadRaw(base, self + kAxisOff) : 0;
   if (self) Peak(g_peak[kAxis][0], LoadF(base, self + kAxisOff));
+  if (self) {
+    g_gp_samples.fetch_add(1, std::memory_order_relaxed);
+    if (__builtin_bswap32(LoadRaw(base, self + 228)) & 0x80000000u) g_gp_set_entry.fetch_add(1, std::memory_order_relaxed);
+  }
+  GowjNativeClearGamepadFlag(base, self);
   (*kOrig)(ctx, base);
+  if (self && (__builtin_bswap32(LoadRaw(base, self + 228)) & 0x80000000u)) g_gp_set_after.fetch_add(1, std::memory_order_relaxed);
+  GowjNativeClearGamepadFlag(base, self);
+  if constexpr (kAxis == 0) rex::glue::NativeInputPump(ctx, base, self);
   if (strip) {
     StoreRaw(base, self + kAxisOff, raw);
     StoreRaw(base, self + kTimerOff, 0);  // +0.0f

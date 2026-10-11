@@ -8,10 +8,21 @@
 
 namespace rex::glue {
 
+// The temporal upscalers (DLSS, FSR 3.1, FSR 4) are switched off for this release: the picture flickers while
+// moving at the render sizes the game can draw, and the work is paused until that is fixed. The code stays;
+// set this to true to bring them back (the launcher card and the libraries need restoring too).
+inline constexpr bool kTemporalUpscalers = false;
+
 struct QualityPlan {
   int tier = 1;  // 0 low (handheld / integrated), 1 medium, 2 high
   const char* tier_name = "medium";
   int scale = 1;  // draw_resolution_scale_x/y
+  bool low_end = false;    // Low tier: apply the lighter engine settings (see gowj_low_end.h)
+  std::string upscaler_override;  // non-empty: use this upscaler instead of the configured one (REX_GOWJ_UPSCALER)
+  bool upscaler = false;   // a temporal upscaler (DLSS / FSR) is selected in the config
+  int upscale_mode = 2;    // 2 quality (guest frame 1440p), 0 performance (1080p), 3 ultra performance (720p)
+  uint32_t render_final_h = 0;  // intended render height of the upscaler input (log only)
+  int render_w = 0, render_h = 0;  // guest render target override for the upscaler (0 = the guest's 720p)
   bool smaa = true;
   bool fsr = true;
   int aniso = 4;  // anisotropic_override (3 = 4x, 4 = 8x, 5 = 16x)
@@ -34,11 +45,14 @@ struct QualityPlan {
 // and picks a tier. Call before the GPU initializes (ApplyDisplayDefaults).
 // `config_path` is read directly (gowj_quality, d3d12_adapter) because the config file is only
 // applied to the settings system after the point where the plan is needed.
-QualityPlan ChooseQualityPlan(uint32_t monitor_height, const std::filesystem::path& config_path = {});
+QualityPlan ChooseQualityPlan(uint32_t monitor_height, const std::filesystem::path& config_path = {},
+                              uint32_t monitor_width = 0);
 
 // Called once the config file is known: only a tier-chosen resolution (not one the user
 // wrote) may be changed by the tuner.
 void QualityStartTuner(const QualityPlan& plan, bool managed);
+// Draw-distance steps the tuner has saved for this GPU (0..2); each step multiplies the distance by 0.8.
+int QualityDrawDistanceSteps(const std::string& gpu);
 
 // Per guest frame (refresh stream), from the PERFWATCH hooks.
 void QualityNoteFrame(uint64_t interval_us);

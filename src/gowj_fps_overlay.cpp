@@ -39,7 +39,7 @@ LARGE_INTEGER g_freq;
 bool g_visible = true;
 HWND g_overlay = nullptr;
 HWND g_game = nullptr;
-char g_lines[4][110] = {"FPS --", "", "", ""};
+char g_lines[5][110] = {"FPS --", "", "", "", ""};
 
 double NowQpcMs(int64_t q) { return 1000.0 * double(q) / double(g_freq.QuadPart); }
 
@@ -90,7 +90,7 @@ void Recompute() {
   }
   if (cnt == 0) {
     snprintf(g_lines[0], sizeof(g_lines[0]), "FPS --");
-    g_lines[1][0] = g_lines[2][0] = 0;
+    g_lines[1][0] = g_lines[2][0] = g_lines[4][0] = 0;
     snprintf(g_lines[3], sizeof(g_lines[3]), "%s", rex::glue::QualityOverlayLine().c_str());
     return;
   }
@@ -110,6 +110,9 @@ void Recompute() {
   snprintf(g_lines[2], sizeof(g_lines[2]), "present %.0f/s   limit %s [F8]", pres_fps,
            (lim.empty() || lim == "0") ? "UNLOCKED" : lim.c_str());
   snprintf(g_lines[3], sizeof(g_lines[3]), "%s", rex::glue::QualityOverlayLine().c_str());
+  // Temporal upscaler status (set by the GPU plugin; empty when the upscaler is off).
+  const std::string up = rex::cvar::GetFlagByName("gowj_upscale_status");
+  snprintf(g_lines[4], sizeof(g_lines[4]), "%s", up.c_str());
 }
 
 LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
@@ -126,12 +129,15 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     HGDIOBJ old = SelectObject(dc, font);
     SetBkMode(dc, TRANSPARENT);
     int y = 2;
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < 5; ++i) {
       if (!g_lines[i][0]) continue;
       const int len = int(strlen(g_lines[i]));
       SetTextColor(dc, RGB(24, 24, 24));  // shadow (not the key colour)
       TextOutA(dc, 3, y + 1, g_lines[i], len);
-      SetTextColor(dc, i == 0 ? RGB(80, 255, 80) : i == 3 ? RGB(255, 200, 80) : RGB(230, 230, 230));
+      SetTextColor(dc, i == 0   ? RGB(80, 255, 80)
+                       : i == 3 ? RGB(255, 200, 80)
+                       : i == 4 ? RGB(120, 200, 255)
+                                : RGB(230, 230, 230));
       TextOutA(dc, 2, y, g_lines[i], len);
       y += 22;
     }
@@ -151,7 +157,7 @@ void OverlayThread() {
   RegisterClassA(&wc);
   g_overlay = CreateWindowExA(WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TRANSPARENT |
                                   WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
-                              wc.lpszClassName, "gowj_fps", WS_POPUP, 0, 0, 560, 96, nullptr,
+                              wc.lpszClassName, "gowj_fps", WS_POPUP, 0, 0, 720, 118, nullptr,
                               nullptr, wc.hInstance, nullptr);
   if (!g_overlay) {
     REXLOG_WARN("FPS overlay: window creation failed ({})", GetLastError());
@@ -169,7 +175,15 @@ void OverlayThread() {
       DispatchMessageA(&msg);
     }
     if (!g_game || !IsWindow(g_game)) g_game = FindGameWindow();
+#ifdef GOWJ_DEV_TOOLS
+    static const bool always = [] {
+      const char* e = std::getenv("GOWJ_FPS_ALWAYS");
+      return e && *e == '1';
+    }();  // test rigs: show the overlay without window focus (hidden desktop)
+    const bool fg = g_game && (always || GetForegroundWindow() == g_game) && !IsIconic(g_game);
+#else
     const bool fg = g_game && GetForegroundWindow() == g_game && !IsIconic(g_game);
+#endif
     const bool f9 = fg && (GetAsyncKeyState(VK_F9) & 0x8000) != 0;
     if (f9 && !f9_prev) g_visible = !g_visible;
     f9_prev = f9;
@@ -192,7 +206,7 @@ void OverlayThread() {
       POINT p{0, 0};
       ClientToScreen(g_game, &p);
       Recompute();
-      SetWindowPos(g_overlay, HWND_TOPMOST, p.x + 12, p.y + 10, 560, 96,
+      SetWindowPos(g_overlay, HWND_TOPMOST, p.x + 12, p.y + 10, 720, 118,
                    SWP_NOACTIVATE | SWP_SHOWWINDOW);
       InvalidateRect(g_overlay, nullptr, TRUE);
     } else {

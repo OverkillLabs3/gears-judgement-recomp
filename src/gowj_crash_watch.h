@@ -6,7 +6,7 @@
 // the exe is stripped (no COFF symbol table, no .pdb), so a raw RIP says nothing
 // about which PPC function was executing, and the runtime's own log stops dead
 // because the faulting thread holds the logger while WER tears the process down.
-// Measured 2026-09-24 09:25: the level-start path exited 0xC0000005 with an empty
+// Measured 09:25: the level-start path exited 0xC0000005 with an empty
 // FATAL list, which the autoresolve loop correctly classified as "manual triage"
 // and then could not act on.
 //

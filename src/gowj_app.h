@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <array>
 #include <vector>
+#include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -38,6 +40,7 @@
 #include "gowj_utf8_guard.h"
 #include "gowj_xam_input_guard.h"
 #include "gowj_perf_watch.h"
+#include "gowj_coalesced.h"
 #include "gowj_quality.h"
 #include "gowj_perf_watch.h"
 #include "gowj_crash_watch.h"
@@ -160,7 +163,10 @@ class GowjApp : public rex::ReXApp {
   // The scale line the tier chose lives in a marked block that is rewritten every boot, so
   // a GPU change or a tuner step takes effect. A draw_resolution_scale_ line written by the
   // user OUTSIDE the block always wins and is never touched (returns false = unmanaged).
-  static bool EnsureAutoResolutionScale(const std::filesystem::path& cfg, int scale) {
+  // force_auto: an upscaler is on, so the frame buffers follow the screen. A resolution the player
+  // picked is set aside (not deleted) and comes back when the upscaler is turned off.
+  static bool EnsureAutoResolutionScale(const std::filesystem::path& cfg, int scale, bool force_auto = false) {
+    static constexpr const char* kSuspended = "#gowj-suspended# ";
     static constexpr const char* kBegin = "# >>> gowj auto quality (managed block";
     static constexpr const char* kEnd = "# <<< gowj auto quality";
     std::string text;
@@ -196,8 +202,19 @@ class GowjApp : public rex::ReXApp {
         if (line.rfind(kEnd, 0) == 0) in_block = false;
         continue;
       }
+      if (line.rfind(kSuspended, 0) == 0) {
+        if (force_auto) {
+          kept += line + "\n";
+          continue;
+        }
+        line = line.substr(std::strlen(kSuspended));  // upscaler is off again: the player's choice is back
+      }
       const size_t b = line.find_first_not_of(" \t");
       if (b != std::string::npos && line.compare(b, 22, "draw_resolution_scale_") == 0) {
+        if (force_auto) {
+          kept += std::string(kSuspended) + line + "\n";
+          continue;
+        }
         user_set = true;
       }
       kept += line + "\n";
@@ -248,7 +265,7 @@ class GowjApp : public rex::ReXApp {
   // Fill display cvars the user has NOT chosen, from the real monitor. Runs in
   // OnPreSetup, i.e. BEFORE Runtime::Setup() initializes the GPU: several of
   // these are read during graphics init, so setting them later is a no-op that
-  // still reports success. Measured 2026-09-24: the previous placement
+  // still reports success. Measured: the previous placement
   // (OnPostSetup, 344 ms after "GPU system initialized") AND the unconditional
   // SetFlagByName both made the code claim a mode it never applied - it stomped
   // --video_mode_width=1920 back to 1280 and logged "3840x2160" while the guest
@@ -302,6 +319,7 @@ class GowjApp : public rex::ReXApp {
     }
   }
   rex::glue::QualityPlan quality_plan_;
+  std::string low_end_summary_;
   bool quality_plan_ready_ = false;
   // The plan has to exist before OnConfigurePaths writes the resolution into the config, which
   // is earlier than anything else in start-up, so it is computed on first use from there.
@@ -309,10 +327,30 @@ class GowjApp : public rex::ReXApp {
     if (quality_plan_ready_) return;
     DEVMODEW dm{};
     dm.dmSize = sizeof(dm);
-    const uint32_t height =
-        EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &dm) && dm.dmPelsHeight ? dm.dmPelsHeight : 1080;
-    quality_plan_ = rex::glue::ChooseQualityPlan(height, config_path);
+    const bool have_mode = EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &dm) && dm.dmPelsHeight;
+#ifdef GOWJ_DEV_TOOLS
+    {
+      // Test rigs: GOWJ_FORCE_MONITOR=3840x2160 pins the monitor size the plan works from.
+      char fm[32]{};
+      unsigned fw = 0, fh = 0;
+      if (GetEnvironmentVariableA("GOWJ_FORCE_MONITOR", fm, sizeof fm) && std::sscanf(fm, "%ux%u", &fw, &fh) == 2) {
+        dm.dmPelsWidth = fw;
+        dm.dmPelsHeight = fh;
+      }
+    }
+#endif
+    const uint32_t height = (have_mode || dm.dmPelsHeight) && dm.dmPelsHeight ? dm.dmPelsHeight : 1080;
+    quality_plan_ = rex::glue::ChooseQualityPlan(height, config_path, dm.dmPelsWidth);
     quality_plan_ready_ = true;
+    // The upscaler (GPU plugin) scales the finished game frame to the screen size.
+    if (!rex::glue::kTemporalUpscalers) {
+      _putenv_s("REX_GOWJ_UPSCALER", "off");  // wins over a leftover gowj_upscaler line in the config
+    } else if (!quality_plan_.upscaler_override.empty() && !std::getenv("REX_GOWJ_UPSCALER")) {
+      _putenv_s("REX_GOWJ_UPSCALER", quality_plan_.upscaler_override.c_str());
+      REXLOG_INFO("QUALITY upscaler for this session: {} ({})", quality_plan_.upscaler_override, quality_plan_.reason);
+    }
+    _putenv_s("GOWJ_TARGET_W", std::to_string(dm.dmPelsWidth ? dm.dmPelsWidth : 1920).c_str());
+    _putenv_s("GOWJ_TARGET_H", std::to_string(height).c_str());
   }
   void ApplyDisplayDefaults() {
 #ifdef _WIN32
@@ -336,7 +374,7 @@ class GowjApp : public rex::ReXApp {
     // The default is 1 - the guest's own 720p raster, unscaled. scale=3 was
     // measured to produce a genuinely sharp 3840x2160 title frame, but it also
     // put a blue cluster over the frame corner that the scale=1 control at the
-    // same crop does not have (output/logs/sw_r2_s3_0.png vs sw_s1_stock_0.png),
+    // same crop does not have,
     // so it is opt-in rather than shipped. Sharpness effort now goes into the
     // quality cvars at the bottom of this function instead.
     const bool force_scale = GetEnvironmentVariableA("GOWJ_RES_SCALE", nullptr, 0) > 0;
@@ -347,37 +385,40 @@ class GowjApp : public rex::ReXApp {
         env_or("GOWJ_RES_SCALE", std::to_string(quality_plan_.scale).c_str());
     int32_t scale = 1;
     try {
-      scale = std::clamp(std::stoi(scale_s), 1, 4);
+      // 720p is the only internal resolution of this release: 1440p was too heavy for most PCs. Only the
+      // developer override GOWJ_RES_SCALE can ask for more.
+      scale = force_scale ? std::clamp(std::stoi(scale_s), 1, 4) : 1;
     } catch (...) {
       scale = 1;
     }
     const std::string eff = std::to_string(scale);
-    bool scale_ok = force_scale
-                        ? (rex::cvar::SetFlagByName("draw_resolution_scale_x", eff) &&
-                           rex::cvar::SetFlagByName("draw_resolution_scale_y", eff))
-                        : (SetIfUnset("draw_resolution_scale_x", eff) &&
-                           SetIfUnset("draw_resolution_scale_y", eff));
+    bool scale_ok = rex::cvar::SetFlagByName("draw_resolution_scale_x", eff) &&
+                    rex::cvar::SetFlagByName("draw_resolution_scale_y", eff);
     // The guest's OWN render target. sub_82990A28 stores a literal 720 and a
     // width clamped to [904,1280] into the two globals every buffer size in the
     // engine derives from, and the post-codegen patch reroutes those three writes
     // through gowj_render_width/height (src/gowj_render_scale.cpp,
     // tools/patch_render_resolution.py) so the host can raise them.
     //
-    // Measured 2026-09-24: raising them is NOT the way to 4K. The Xenon EDRAM is
+    // Measured: raising them is NOT the way to 4K. The Xenon EDRAM is
     // 10 MB, so the guest bands its render passes against a ~2.62 Mpixel budget at
     // 32bpp, and once the composed target cannot fit in one band the final resolve
     // draws N shrunken diagonal copies of the whole frame instead of one image
-    // (output/logs/sw_r1_4k.png: 3840x2160 -> 3 copies; 2560x1440 shatters the
+    // (3840x2160 -> 3 copies; 2560x1440 shatters the
     // same way at 3.69 Mpixel). 1920x1080 (2.07 Mpixel) is clean, which is the
     // ceiling this route can ever reach. So the default leaves the guest on its
     // own 720p path - which bands correctly by design - and the panel is filled by
     // draw_resolution_scale, which scales the emulator's EDRAM and raster instead
-    // of the guest's bookkeeping (output/logs/sw_r2_s3.png: one correctly composed
+    // of the guest's bookkeeping (one correctly composed
     // 3840x2160 frame). Setting gowj_render_* in the config still overrides, for
     // anyone who wants the 1080p guest target.
+    // With an upscaler the plan picks the guest frame size from the upscale mode (1080p for
+    // Performance, otherwise the guest's own 720p; 1440p comes from the resolution scale).
     bool render_ok =
-        SetIfUnset("gowj_render_width", "0") &&
-        SetIfUnset("gowj_render_height", "0");
+        quality_plan_.upscaler
+            ? (rex::cvar::SetFlagByName("gowj_render_width", std::to_string(quality_plan_.render_w)) &&
+               rex::cvar::SetFlagByName("gowj_render_height", std::to_string(quality_plan_.render_h)))
+            : (SetIfUnset("gowj_render_width", "0") && SetIfUnset("gowj_render_height", "0"));
     // The mode the guest is TOLD about (XGetVideoMode / VdQueryVideoMode). It
     // feeds only the aspect ratio the engine multiplies its hardcoded 720 by -
     // it does NOT set the render-target size, which is why raising it alone was
@@ -481,6 +522,7 @@ class GowjApp : public rex::ReXApp {
     // source of the silent 0xC0000374 / 0xC000001D deaths. Serializes it and
     // counts the overlaps it removes; see gowj_xam_input_guard.cpp.
     rex::glue::InstallXamInputGuard();
+    rex::glue::InstallDiscErrorSilencer();
     // The frame-pacing instrument: timestamps the presenter's two virtual entry
     // points so "fps" and "pacing" become measured series instead of impressions
     // (see gowj_perf_watch.cpp). Read-only - it hooks, logs, and calls through.
@@ -581,8 +623,31 @@ class GowjApp : public rex::ReXApp {
                                  std::filesystem::copy_options::skip_existing, ec);
     }
     EnsureQualityPlan(paths.config_path);
+    // Low preset only: lighter engine settings, applied to a cached copy of the player's own
+    // Coalesced files (the game folder is not modified). Cleared otherwise.
+    _putenv_s("GOWJ_VFS_OVERRIDES", "");
+    std::string vfs_overrides;
+    {
+      const auto opts = rex::glue::OptionsFromConfig(paths.config_path, quality_plan_.low_end, quality_plan_.tier >= 1, quality_plan_.tier,
+                                                  rex::glue::QualityDrawDistanceSteps(quality_plan_.gpu_name));
+      _putenv_s("GOWJ_NATIVE_KEYS", rex::glue::ForwardedKeys(opts).c_str());
+      const auto co = rex::glue::PrepareCoalescedOverrides(paths.game_data_root, paths.cache_root, opts);
+      vfs_overrides = co.overrides;
+      low_end_summary_ = co.summary;
+    }
+#ifdef GOWJ_DEV_TOOLS
+    {
+      // Test rigs: GOWJ_VFS_TEST="guest/path=host file;..." adds file overrides for experiments.
+      char t[2048]{};
+      if (GetEnvironmentVariableA("GOWJ_VFS_TEST", t, sizeof t) && t[0]) {
+        if (!vfs_overrides.empty()) vfs_overrides += ";";
+        vfs_overrides += t;
+      }
+    }
+#endif
+    if (!vfs_overrides.empty()) _putenv_s("GOWJ_VFS_OVERRIDES", vfs_overrides.c_str());
     rex::glue::QualityStartTuner(
-        quality_plan_, EnsureAutoResolutionScale(paths.config_path, quality_plan_.scale));
+        quality_plan_, EnsureAutoResolutionScale(paths.config_path, quality_plan_.scale, true));  // true: a leftover draw_resolution_scale line is set aside, 720p only
     // Nothing logged here: SetupEnvironment runs paths *before* logging, so
     // REXLOG_* calls in this hook are dropped. Paths and the config load are
     // reported from OnPostInitLogging instead.
@@ -590,6 +655,7 @@ class GowjApp : public rex::ReXApp {
   }
   void OnPostInitLogging() override {
     if (!quality_plan_.summary.empty()) REXLOG_INFO("{}", quality_plan_.summary);
+    if (!low_end_summary_.empty()) REXLOG_INFO("{}", low_end_summary_);
     REXLOG_INFO("gowj paths: game='{}' user='{}' update='{}' cache='{}' "
                 "metadata='{}' config='{}' saves='{}'",
                 paths_.game_data_root.string(), paths_.user_data_root.string(),
@@ -678,11 +744,11 @@ class GowjApp : public rex::ReXApp {
     // root name this title uses must be its own registered VFS device or
     // NtCreateFile fails and the save-check flow dies. Measured root names, in
     // the order they first appear in the boot log:
-    //   savedrive0:  PlayerStorage.dat (Xbox user storage)  - boot_menu1.log
-    //   SG1_0:       GearsCheckpoint, first player slot     - boot_cam0.log 08:49
-    //   SG2_0:       GearsCheckpoint, second player slot    - boot_cam0.log 08:51
+    //   savedrive0:  PlayerStorage.dat (Xbox user storage)
+    //   SG1_0:       GearsCheckpoint, first player slot   
+    //   SG2_0:       GearsCheckpoint, second player slot  
     //   SG0_0:       gamer-data drive the guest probes at boot
-    // Measured 2026-09-24 (boot_m6h.log): the slot scan walks SG0_0..SG5_0 one
+    // Measured: the slot scan walks SG0_0..SG5_0 one
     // slot every 30-90 s, so mounting only four left SG4_0/SG5_0 unregistered
     // and their XamContentCreateEx failed - the guest then treats the storage
     // as broken and offers to overwrite it. Mount eight: the observed range
@@ -698,7 +764,7 @@ class GowjApp : public rex::ReXApp {
                                              "savedrive2:", "savedrive3:"};
     // SGn_0 is NOT a slot: it is a symbolic root the guest re-rolls every time it
     // opens the GearsCheckpoint package, and on hardware every alias resolves to
-    // the same content package. Measured 2026-09-25: with one host dir per alias,
+    // the same content package. Measured: with one host dir per alias,
     // each session's checkpoint landed in a different SGn_0 (SG1..SG7 each held
     // one), so the next boot opened another alias, found nothing or a 0-byte probe,
     // and reported the save corrupted. All checkpoint aliases share one directory.
@@ -724,7 +790,7 @@ class GowjApp : public rex::ReXApp {
       // checkpoint is ~164 KB, so a zero-length file is never a valid save:
       // drop it before the guest probes so the slot reads as empty, not corrupt.
       //
-      // Scoped to checkpoint probes ONLY. Measured 2026-09-24: the unscoped sweep
+      // Scoped to checkpoint probes ONLY. Measured: the unscoped sweep
       // deleted a PlayerStorage.dat and the guest's very next open of it failed
       // with STATUS_NO_SUCH_FILE - xam creates that file empty on real hardware
       // before the game writes it, so an empty PlayerStorage.dat is legitimate.
@@ -787,11 +853,11 @@ class GowjApp : public rex::ReXApp {
     // game_data_root is the directory the loader found default.xex in, so this
     // mounts the player's own dump and ships no game content of its own.
     //
-    // GATED OFF by default as of 2026-09-25. Measured, both sides: with D: mounted
+    // GATED OFF by default. Measured, both sides: with D: mounted
     // the run died at mission start AND at the PRESS START title (0xC0000374 /
     // 0xC000001D / a second-chance AV, no [FATAL] line); with it unmounted the
     // player gets into and plays the mission - but a title-idle death still
-    // reproduced at ~12 s (0xC0000005, output/logs/hybrid.game.log), so THE MOUNT
+    // reproduced at ~12 s (0xC0000005), so THE MOUNT
     // IS NOT THE ROOT CAUSE. It is a frequency knob on an unnamed memory-corruption
     // bug that is still open: newly-reachable disc content drives guest code that
     // had never executed, and that makes the existing fault land far more often.

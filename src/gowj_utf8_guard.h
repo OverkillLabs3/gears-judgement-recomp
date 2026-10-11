@@ -11,7 +11,7 @@
 // entry, turns into terminate() -> ucrtbase!abort -> __fastfail(7) and the
 // process dies with 0xC0000409 and no [FATAL] line.
 //
-// Measured throw sites (output/logs/boot_iat2.log, 2026-09-24):
+// Measured throw sites :
 //   ContentManager::OpenContent -> utf8_hash_fnv1a_case -> next -> throw
 //   NtCreateFile -> VirtualFileSystem::OpenFile -> ResolvePath
 //                -> ResolveSymbolicLink -> utf8_starts_with_case

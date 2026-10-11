@@ -24,7 +24,7 @@ WHY THIS EXISTS (all measured, no guessing):
                             #  initialised to 1120/688/1344 by sub_82990990 in
                             #  gowj_recomp.120.cpp:17797) is clobbered to
                             #  800x800 plus a flag cleared at base+17496.
-  Measured 2026-09-24: overriding the width to 2560/3840 takes that fallback, and
+  Measured: overriding the width to 2560/3840 takes that fallback, and
   the frame then appears stacked target_height/720 times - the engine is still
   laying its output out against a size that is no longer the render target. So
   the guard is fed the guest's own pre-override width instead of the stored one:

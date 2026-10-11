@@ -1,6 +1,6 @@
 // gowj - ReXGlue Recompiled Project
 //
-// Lifts the engine's own frame-rate cap. Measured 2026-10-03: with the pacer unlocked
+// Lifts the engine's own frame-rate cap. Measured: with the pacer unlocked
 // (gowj_pace_hz = 0) the guest still ran at exactly 62.0 fps (mean frame 16.1 ms), which
 // is Unreal Engine 3's MaxSmoothedFrameRate default - UGameEngine::Tick sleeps to hold it
 // when bSmoothFrameRate is on. The two config floats sit next to each other in the engine

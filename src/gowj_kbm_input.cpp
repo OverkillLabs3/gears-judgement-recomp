@@ -1,9 +1,13 @@
 // gowj keyboard+mouse -> pad driver implementation. See header for rationale.
 
 #include "gowj_kbm_input.h"
+#include "gowj_native_input.h"
 #include "gowj_view_accel.h"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -226,7 +230,7 @@ namespace {
 // thrown away there, and the whole path behaves exactly like the thumbstick it
 // was meant to bypass. Naming the callee is the only way to find out instead of
 // assuming, so the last target per axis is kept for the KBMRATE line.
-// Measured 2026-09-25 00:49: 0x82638CB8 - an input-component axis *dispatcher*
+// Measured 00:49: 0x82638CB8 - an input-component axis *dispatcher*
 // (it walks a bound-handler array and re-issues each handler through a vtable
 // slot), which is why the axis domain is a normalized deflection.
 std::atomic<uint32_t> g_callee[2]{ {0}, {0} };
@@ -272,6 +276,12 @@ REXCVAR_DEFINE_DOUBLE(mnk_menu_mouse_step, 120.0, "mnk",
 
 // Not in gameplay: the camera look dispatch has not asked for a delta recently,
 // or the last axis call went to the UI handler (pause menu over gameplay).
+// Last time the keyboard-driven virtual pad held a face/shoulder/stick-click button, or any button.
+static std::atomic<int64_t> g_virt_face_ms{0};
+static std::atomic<int64_t> g_virt_any_ms{0};
+extern "C" int64_t GowjVirtualFaceMs() { return g_virt_face_ms.load(std::memory_order_relaxed); }
+extern "C" int64_t GowjVirtualAnyMs() { return g_virt_any_ms.load(std::memory_order_relaxed); }
+
 static bool InMenus() { return REXCVAR_GET(mnk_raw_look) && !RawLookConsumerLive(); }
 
 // Signed look angle (engine units: 1.0 = one second at full deflection) the
@@ -437,13 +447,13 @@ constexpr DefaultBind kPreferredBinds[] = {
     // measured) picks items up, revives and accepts prompts. The player's PC list
     // splits these across Space (cover) and E (use/pick up/revive), but the
     // console guest has only the one interact button, so BOTH keys drive A.
-    {"keybind_a", "Space,Return,E"},      // cover / interact / use / revive / accept
-    {"keybind_b", "Control,V"},          // crouch (hold) / execute (tap)
+    {"keybind_a", "Return,Space"},      // cover / interact / use / revive / accept
+    {"keybind_b", "Backspace"},          // menu back (gameplay uses the engine's own bindings)
     {"keybind_x", "R"},                  // reload / rev chainsaw
     // Y is weapon-swap (confirmed by the in-game tutorial prompt). There is no
     // keyboard key for it in the player's PC list - the wheel pulses Y directly
     // (OnMouseWheel), so leave the binding empty rather than steal a letter.
-    {"keybind_y", ""},                   // weapon swap = mouse wheel
+    {"keybind_y", "Y"},                  // menu Y action
     {"keybind_start", "Escape"},         // pause menu
     {"keybind_back", "Tab"},             // objectives / scoreboard
     {"keybind_guide", ""},               // no Xbox-guide equivalent
@@ -723,6 +733,60 @@ void GowjKbmInputDriver::EnumerateDevices(std::vector<DeviceInfo>& out) {
   out.push_back(std::move(info));
 }
 
+#ifdef GOWJ_DEV_TOOLS
+namespace {
+// Remote pad for unattended test runs (GOWJ_REMOTE_PAD=1): gowj_pad.txt holds
+// "<hex buttons> [lx ly rx ry]" (sticks as decimal int16). Read at most every 15 ms.
+std::atomic<int16_t> g_remote_ry{0};
+struct RemotePad {
+  uint16_t buttons = 0;
+  int16_t lx = 0, ly = 0, rx = 0, ry = 0;
+};
+RemotePad ReadRemotePad() {
+  static const bool enabled = [] {
+    const char* e = std::getenv("GOWJ_REMOTE_PAD");
+    return e && *e == '1';
+  }();
+  RemotePad out;
+  if (!enabled) return out;
+  static std::atomic<int64_t> next_ms{0};
+  static std::atomic<uint64_t> packed{0};
+  const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::chrono::steady_clock::now().time_since_epoch())
+                          .count();
+  if (now >= next_ms.load(std::memory_order_relaxed)) {
+    next_ms.store(now + 15, std::memory_order_relaxed);
+    RemotePad v;
+    if (FILE* f = std::fopen("gowj_pad.txt", "r")) {
+      unsigned x = 0;
+      int a = 0, b = 0, c = 0, d = 0;
+      int n = std::fscanf(f, "%x %d %d %d %d", &x, &a, &b, &c, &d);
+      if (n >= 1) v.buttons = uint16_t(x);
+      if (n >= 5) {
+        v.lx = int16_t(a);
+        v.ly = int16_t(b);
+        v.rx = int16_t(c);
+        v.ry = int16_t(d);
+      }
+      std::fclose(f);
+    }
+    packed.store(uint64_t(v.buttons) | (uint64_t(uint16_t(v.lx)) << 16) |
+                     (uint64_t(uint16_t(v.ly)) << 32) | (uint64_t(uint16_t(v.rx)) << 48),
+                 std::memory_order_relaxed);
+    g_remote_ry.store(v.ry, std::memory_order_relaxed);
+  }
+  const uint64_t p = packed.load(std::memory_order_relaxed);
+  out.buttons = uint16_t(p);
+  out.lx = int16_t(p >> 16);
+  out.ly = int16_t(p >> 32);
+  out.rx = int16_t(p >> 48);
+  out.ry = g_remote_ry.load(std::memory_order_relaxed);
+  return out;
+}
+uint16_t RemotePadButtons() { return ReadRemotePad().buttons; }
+}  // namespace
+#endif
+
 X_RESULT GowjKbmInputDriver::GetDeviceState(DeviceId id,
                                             X_INPUT_STATE* out_state) {
   if (id != device_id_ || !out_state) {
@@ -934,19 +998,47 @@ X_RESULT GowjKbmInputDriver::GetDeviceState(DeviceId id,
       -kStickMax, kStickMax);
 
   uint16_t buttons = buttons_.load(std::memory_order_relaxed);
+#ifdef GOWJ_DEV_TOOLS
+  buttons |= RemotePadButtons();  // GOWJ_REMOTE_PAD=1: test rigs drive the pad through gowj_pad.txt
+#endif
   if (NowMs() < sticky_until_ms_.load(std::memory_order_relaxed)) {
     buttons |= sticky_buttons_.load(std::memory_order_relaxed);
   } else {
     sticky_buttons_.store(0, std::memory_order_relaxed);
   }
 
+  // While the engine's own keyboard/mouse bindings drive gameplay (see gowj_native_input.cpp),
+  // the virtual pad must not ALSO press the same buttons: drop everything the keyboard and
+  // mouse used to fake. Start, Back and the d-pad stay (pause, scoreboard and menu keys).
+  const bool native_keys = GowjNativeKeysDriving();
+  // The face and shoulder buttons stay on the virtual pad: menus read them there and the engine's UI
+  // consumes them before they reach the player input. In gameplay the same press also arrives at the
+  // player input, where gowj_native_input.cpp drops it because the native key already did the job.
+  {
+    constexpr uint16_t kFace = kBtnA | kBtnB | kBtnX | kBtnY | kBtnLShoulder | kBtnRShoulder | kBtnLThumb | kBtnRThumb;
+    const int64_t now = int64_t(NowMs());
+    if (buttons & kFace) g_virt_face_ms.store(now, std::memory_order_relaxed);
+    if (buttons) g_virt_any_ms.store(now, std::memory_order_relaxed);
+  }
   out_state->packet_number = packet_.load(std::memory_order_relaxed);
   out_state->gamepad.buttons = buttons;
-  out_state->gamepad.left_trigger = lt_.load(std::memory_order_relaxed);
-  out_state->gamepad.right_trigger = rt_.load(std::memory_order_relaxed);
-  out_state->gamepad.thumb_lx = lx_.load(std::memory_order_relaxed);
-  out_state->gamepad.thumb_ly = ly_.load(std::memory_order_relaxed);
+  out_state->gamepad.left_trigger = native_keys ? 0 : lt_.load(std::memory_order_relaxed);
+  out_state->gamepad.right_trigger = native_keys ? 0 : rt_.load(std::memory_order_relaxed);
+  out_state->gamepad.thumb_lx = native_keys ? 0 : lx_.load(std::memory_order_relaxed);
+  out_state->gamepad.thumb_ly = native_keys ? 0 : ly_.load(std::memory_order_relaxed);
   out_state->gamepad.thumb_rx = static_cast<int16_t>(rx);
+#ifdef GOWJ_DEV_TOOLS
+  {
+    const RemotePad rp = ReadRemotePad();
+    if (rp.lx || rp.ly || rp.rx || rp.ry) {
+      out_state->gamepad.thumb_lx = rp.lx;
+      out_state->gamepad.thumb_ly = rp.ly;
+      out_state->gamepad.thumb_rx = rp.rx;
+      rx = rp.rx;
+      ry = rp.ry;
+    }
+  }
+#endif
   out_state->gamepad.thumb_ry = static_cast<int16_t>(ry);
   return X_ERROR_SUCCESS;
 }
@@ -1009,6 +1101,7 @@ void GowjKbmInputDriver::UpdateCapture() {
   if (mouse_captured_.exchange(want, std::memory_order_relaxed) == want) {
     return;
   }
+  GowjNativeSetActive(want);
   ApplyMouseCapture();
 }
 
@@ -1184,6 +1277,7 @@ void GowjKbmInputDriver::OnMouseMove(rex::ui::MouseEvent& e) {
     menu_nav_x_.store(nx, std::memory_order_relaxed);
     menu_nav_y_.store(ny, std::memory_order_relaxed);
   }
+  GowjNativeNoteKbmActivity();
   mouse_dx_.store(mouse_dx_.load(std::memory_order_relaxed) + e.dx(),
                   std::memory_order_relaxed);
   mouse_dy_.store(mouse_dy_.load(std::memory_order_relaxed) + e.dy(),
@@ -1201,7 +1295,10 @@ void GowjKbmInputDriver::OnMouseWheel(rex::ui::MouseEvent& e) {
   // your primary weapons"; the bumpers are melee/grenade, so a wheel detent must
   // tap Y, not LB/RB. Judgment carries a limited kit, so either direction just
   // toggles the swap button.
-  if (InMenus()) {
+  if (GowjNativeKeysDriving()) {
+    // Native keys drive the game: the wheel becomes MouseScrollUp/Down key events.
+    GowjNativeNoteWheel(e.scroll_y() > 0 ? 1 : -1);
+  } else if (InMenus()) {
     PulseButton(e.scroll_y() > 0 ? kBtnUp : kBtnDown);  // wheel scrolls menus
   } else {
     PulseButton(kBtnY);
@@ -1268,7 +1365,7 @@ void GowjKbmInputDriver::ApplyMouseCapture() {
 #ifdef _WIN32
   // SDL's relative mode does not confine the OS cursor: an accumulated look
   // delta parks the invisible cursor on the title bar, where the next LMB hits
-  // the close button (measured 2026-09-24 15:33 - a scripted look+fire burst
+  // the close button (measured 15:33 - a scripted look+fire burst
   // closed the window mid-combat). Clip to the client rect while captured; the
   // clip is process-global, so it must be dropped with the capture, which the
   // focus-loss path guarantees via ReleaseAll -> UpdateCapture.

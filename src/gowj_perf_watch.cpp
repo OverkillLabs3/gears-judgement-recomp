@@ -51,6 +51,10 @@
 //     grid throttled Act 1 to 17.1 fps. The wall-clock version is why the probe is
 //     now log-only.
 
+#include "gowj_pgo.h"
+#ifdef GOWJ_DEV_TOOLS
+#include "gowj_profiler.h"
+#endif
 #include "gowj_perf_watch.h"
 #include "gowj_fps_overlay.h"
 #include "gowj_fps_unlock.h"
@@ -319,6 +323,9 @@ void OnEvent(size_t kind, uint64_t in_hook_us) {
   c.have_last = true;
   rex::glue::FpsOverlayNote(kind, interval_us);
   if (kind == 1) rex::glue::QualityNoteFrame(interval_us);
+#ifdef GOWJ_DEV_TOOLS
+  rex::glue::FrameLogNote(kind, interval_us);
+#endif
   NoteEvent(c, interval_us, in_hook_us);
   WriteCsv(c.name, interval_us, in_hook_us);
   if (c.count.load(std::memory_order_relaxed) % kReportEvery == 0) {
@@ -922,6 +929,10 @@ void InstallPerfWatch() {
   InstallFpsOverlay();
   InstallFpsUnlock();
   InstallSystemTuning();
+  InstallPgoFlusher();
+#ifdef GOWJ_DEV_TOOLS
+  InstallProfiler();
+#endif
 
   char gate[8]{};
   if (GetEnvironmentVariableA("GOWJ_PERF_WATCH", gate, sizeof(gate)) &&

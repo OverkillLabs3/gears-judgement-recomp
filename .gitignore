@@ -13,3 +13,6 @@ saves/
 config/gowj.toml
 gowj_crash.log
 *.log
+
+# Profile data for the optional GOWJ_PGO build (large, regenerate it as described in BUILDING.md)
+pgo/*.profdata

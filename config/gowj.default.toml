@@ -34,7 +34,7 @@ present_letterbox = false
 #        launch if 60 fps is not held (it never raises it by itself).
 # low    1280x720 internal, no SMAA, 4x anisotropic filtering   (handhelds, integrated GPUs)
 # medium 1280x720 internal + SMAA, 8x anisotropic filtering
-# high   2560x1440 internal + SMAA, 16x anisotropic filtering   (12 GB+ NVIDIA cards)
+# high   720p internal + SMAA, 16x anisotropic filtering        (12 GB+ NVIDIA cards)
 # Adding any of these to your config overrides the tier for that one setting:
 #   draw_resolution_scale_x / draw_resolution_scale_y (1 or 2), anisotropic_override (0-5),
 #   native_2x_msaa, texture_cache_memory_limit_soft / _hard / _render_to_texture,
@@ -61,6 +61,16 @@ use_fuzzy_alpha_epsilon = true
 # gowj_motion_blur = false    the game's motion blur (off by default)
 # gowj_game_fxaa = false      the game's own FXAA pass
 # gowj_scaling_fix = true     community fix that makes the post-process chain resolution-friendly
+
+# ---------- Temporal upscalers ----------
+# DLSS, FSR 3.1 and FSR 4 are switched off in this release, so these two keys have no effect.
+gowj_upscaler = "off"
+gowj_upscale_quality = -1
+
+# Low level only: switch off the game's dynamic lights, shadows, decals, bloom, depth of field,
+# ambient occlusion and other post effects. Applied to a copy of your own game config in the
+# cache folder; Medium and High are never affected.
+gowj_low_end_tweaks = true
 
 # ---------- Frame rate ----------
 vsync = true
@@ -103,3 +113,56 @@ mnk_raw_look_scale = 0.003
 
 # Print the game's input poll rate to the log once per second.
 mnk_fps_meter = true
+
+# ---------- Controls (keyboard and mouse) ----------
+# Gameplay keys go to the game's own input layer, so its bindings, aim and cover logic all work
+# as they do with a controller. Each line below sets the keys for one action: up to a few keys
+# separated by commas. Delete a line to get the default shown. Key names: A-Z, One..Zero (the
+# number row), F1-F12, SpaceBar, LeftShift, LeftControl, LeftAlt, Tab, Enter, BackSpace, Up,
+# Down, Left, Right, Insert/Delete/Home/End/PageUp/PageDown, Slash, Comma, Period, Semicolon,
+# Quote, LeftBracket, RightBracket, Equals, Underscore, NumPadZero..NumPadNine,
+# LeftMouseButton, RightMouseButton, MiddleMouseButton, ThumbMouseButton, ThumbMouseButton2,
+# MouseScrollUp, MouseScrollDown. Esc always pauses.
+# bind_forward = "W"
+# bind_backward = "S"
+# bind_left = "A"
+# bind_right = "D"
+# bind_action = "SpaceBar"          # cover, vault, roll, hold to sprint
+# bind_crouch = "LeftControl,C"
+# bind_walk = "Z"
+# bind_fire = "LeftMouseButton"
+# bind_aim = "RightMouseButton"
+# bind_melee = "F,V"                # melee, execute
+# bind_reload = "R,ThumbMouseButton"
+# bind_zoom = "T,MiddleMouseButton"
+# bind_swap_weapon = "One,MouseScrollUp,MouseScrollDown"
+# bind_grenade = "Two"
+# bind_pickup = "E"                 # pick up, revive, use
+# bind_poi = "Q"                    # look at point of interest
+# bind_tactical = "H"
+# bind_weapon1 = "Three"
+# bind_weapon2 = "Four"
+# bind_scoreboard = "Slash"
+
+# Prompts in menus: auto (keyboard labels like [Enter] unless a gamepad is connected at
+# launch), keyboard, or controller.
+gowj_prompts = "auto"
+
+# Draw distance: auto = the quality level chooses (Low 50%, Medium 75%, High the game's own distance;
+# shorter is a large speed-up on slow PCs). Or a factor in quotes: "0.4" short, "1.0" the game's own, "1.5" far.
+gowj_draw_distance = "auto"
+
+# Comfort. gowj_fov: field of view in degrees for the normal camera modes (stock 80, 0 =
+# leave alone); aiming keeps its own zoom. gowj_no_camera_shake removes the roadie-run shake.
+gowj_fov = 0
+gowj_no_camera_shake = false
+
+# Mouse-friendly camera (no automatic pitch re-centring, no engine mouse smoothing, no on-screen
+# debug messages), and skipping the startup logo movie (saves about 15 seconds per launch).
+gowj_mouse_camera = true
+gowj_skip_logos = false
+
+# Use the game's own keyboard/mouse bindings (recommended). false = the older virtual-gamepad
+# emulation for gameplay keys.
+mnk_native = true
+

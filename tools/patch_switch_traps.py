@@ -6,7 +6,7 @@ RexGlue codegen gives up in two places:
 1. bctr jump tables it under-counts. It emits
    `default: __builtin_trap(); // Switch case out of range`
    (manual [[entrypoint.switch_tables]] are parsed but never applied in SDK
-   0.10.0.9-dev, measured 2026-09-24: "Loaded manual switch table" at debug
+   0.10.0.9-dev, measured: "Loaded manual switch table" at debug
    level, "discoverBlocks: using manual jump table" never emitted). Every such
    switch is preceded by `mtctr rN` -> `ctx.ctr.u64 = ...` computed from the
    real guest table, so ctx.ctr already holds the correct target for ANY index:
@@ -20,8 +20,7 @@ RexGlue codegen gives up in two places:
 
      * branch whose 0xT label already exists in the SAME generated function body
        -> `goto loc_T`. This is the common case in this title: the block is a
-       real intra-function edge that discovery simply failed to link (measured
-       2026-09-24: 0x824AF5C0 is `loc_824AF5C0:` at gowj_recomp.123.cpp:5400 and
+       real intra-function edge that discovery simply failed to link (measured: 0x824AF5C0 is `loc_824AF5C0:` at gowj_recomp.123.cpp:5400 and
        simultaneously "conditional branch to unknown address" at :8507 of the
        same function). Correct guest semantics, no new function, no cycle.
      * otherwise -> REX_CALL_INDIRECT_FUNC(0xT); return; using the dispatch
@@ -52,7 +51,7 @@ FATAL_BARE = re.compile(
 #                    part of the match. Never re-advance `last` by its length -
 #                    doing so skipped the following `len(tail)` characters of the
 #                    source and spliced them into the replacement. Measured
-#                    2026-09-24 15:4x on gowj_recomp.175.cpp:27019, which turned
+#                     on gowj_recomp.175.cpp:27019, which turned
 #                    `\tREX_FATAL(...);\n\treturn;\nloc_82D9D4FC:` into
 #                    `\tREX_CALL_INDIRECT_FUNC(...); return;D4FC:` - i.e. silent
 #                    corruption of the next label, and the actual cause of the
@@ -268,7 +267,7 @@ def main(pattern: str) -> int:
     # An REX_CALL_INDIRECT_FUNC(0xT) is only a problem if nothing is registered
     # at 0xT: the hint added on the previous round turns the same dispatch into a
     # resolved table call, and reporting it again would make static_harvest.py
-    # loop forever on an already-closed class (measured 2026-09-24 15:03, round 1
+    # loop forever on an already-closed class (measured, round 1
     # repeated round 0's 4 targets, all four of which had DEFINE_REX_FUNC bodies).
     reg = set()
     for cand in (Path(files[0]).parent / "gowj_register.cpp",

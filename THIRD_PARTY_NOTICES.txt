@@ -90,3 +90,9 @@ Microsoft Visual C++ runtime (msvcp140*.dll, vcruntime140*.dll): redistributed u
 Microsoft Visual Studio redistributable terms.
 
 SDL GameControllerDB (gamecontrollerdb.txt): zlib License, community-maintained.
+
+
+Low-end engine settings:
+The list of renderer switches turned off on the Low quality level follows the community "Coalesced_INT"
+low-end mod for Xenia, published on ModDB. No file of that mod and no game file is included; the values
+are changed in the user's own game files at run time and saved to a cache folder.

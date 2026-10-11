@@ -4,7 +4,7 @@ Why: ninja decides what is dirty when the build is PLANNED, before any of the
 post-codegen patcher edges run. So when a patcher rewrites a generated .cpp
 during a build whose .obj was already up to date, ninja never queues that
 compile, links the stale object, and the shipped exe silently lacks the patch.
-Measured 2026-09-25 00:21: patch_raw_look rewrote gowj_recomp.133.cpp at
+Measured: patch_raw_look rewrote gowj_recomp.133.cpp at
 00:21:49 and gowj.exe linked at 00:21:54 from an object last compiled at the
 previous afternoon - a 9-hour-stale TU carrying the entire raw-mouse feature.
 

@@ -1,9 +1,9 @@
 """Post-codegen port of the xenia-canary game patches for Gears of War: Judgment.
 
 Source: xenia-canary/game-patches, patches/4D530A26 - Gears of War Judgment.patch.toml
-(title 4D530A26, module hash 8429D0AE190C10DB). Verified 2026-09-25 that the file
+(title 4D530A26, module hash 8429D0AE190C10DB). Verified that the file
 targets this exact image: every patched word below matches the original
-instruction at that address in output/pe/default_decrypted.exe (flat image, file
+instruction at that address in the decrypted PE image (flat image, file
 offset == address - 0x82000000) and the generated code's comment there.
 
 A patch in a recompile has to land on the C++ that implements the instruction,

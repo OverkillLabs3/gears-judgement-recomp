@@ -20,6 +20,7 @@ set(GOWJ_SOURCES
     src/gowj_content_probe.cpp
     src/gowj_save_io_probe.cpp
     src/gowj_view_accel.cpp
+    src/gowj_native_input.cpp
     src/gowj_checkpoint_probe.cpp
     src/gowj_blur_kill.cpp
     src/gowj_game_patches.cpp
@@ -27,6 +28,7 @@ set(GOWJ_SOURCES
     src/gowj_pso_library.cpp
     src/gowj_fps_overlay.cpp
     src/gowj_quality.cpp
+    src/gowj_coalesced.cpp
     src/gowj_fps_unlock.cpp
     src/gowj_system_tuning.cpp
     src/gowj_xam_input_guard.cpp
@@ -45,6 +47,44 @@ foreach(_prefix IN LISTS CMAKE_PREFIX_PATH)
 endforeach()
 
 add_executable(gowj WIN32 ${GOWJ_SOURCES})
+
+# Development hooks (remote pad for unattended test runs, overlay without focus). Off in releases.
+option(GOWJ_DEV_TOOLS "Development-only test hooks" OFF)
+if(GOWJ_DEV_TOOLS)
+    target_compile_definitions(gowj PRIVATE GOWJ_DEV_TOOLS=1)
+    target_sources(gowj PRIVATE src/gowj_profiler.cpp)
+    target_link_libraries(gowj PRIVATE pdh)
+endif()
+target_sources(gowj PRIVATE src/gowj_pgo.cpp)
+
+# PGO (profile-guided optimisation) of the generated guest code, ~100 MB of straight-line recompiled
+# PPC where block layout, inlining and hot/cold splitting matter most.
+#   GOWJ_PGO=gen  instrumented build (a training build, slower than normal); src/gowj_pgo.cpp flushes the
+#                 profile every 20 s. Run with LLVM_PROFILE_FILE=<dir>/gowj_%m.profraw
+#   GOWJ_PGO=use  rebuild with the merged profile: llvm-profdata merge -o pgo/gowj.profdata *.profraw
+# The profile only matches the exact generated sources it was collected from.
+set(GOWJ_PGO "off" CACHE STRING "PGO mode for the generated guest code: off | gen | use")
+set(GOWJ_PGO_PROFDATA "${CMAKE_CURRENT_SOURCE_DIR}/pgo/gowj.profdata" CACHE FILEPATH "Merged profile for GOWJ_PGO=use")
+if(TARGET gowj_recomp AND GOWJ_PGO STREQUAL "gen")
+    get_filename_component(_llvm_bin "${CMAKE_CXX_COMPILER}" DIRECTORY)
+    file(GLOB _prof_libs "${_llvm_bin}/../lib/clang/*/lib/windows/clang_rt.profile-x86_64.lib")
+    list(GET _prof_libs 0 _prof_lib)
+    if(NOT _prof_lib)
+        message(FATAL_ERROR "GOWJ_PGO=gen: clang_rt.profile-x86_64.lib not found under ${_llvm_bin}/../lib/clang")
+    endif()
+    target_compile_options(gowj_recomp PRIVATE -fprofile-instr-generate)
+    target_link_libraries(gowj PRIVATE "${_prof_lib}")
+    target_compile_definitions(gowj PRIVATE GOWJ_PGO_GEN=1)
+    message(STATUS "gowj: PGO instrumentation ON (profile runtime ${_prof_lib})")
+elseif(TARGET gowj_recomp AND GOWJ_PGO STREQUAL "use")
+    if(NOT EXISTS "${GOWJ_PGO_PROFDATA}")
+        message(FATAL_ERROR "GOWJ_PGO=use but ${GOWJ_PGO_PROFDATA} does not exist")
+    endif()
+    target_compile_options(gowj_recomp PRIVATE
+        -fprofile-instr-use=${GOWJ_PGO_PROFDATA}
+        -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date -Wno-backend-plugin)
+    message(STATUS "gowj: PGO profile ${GOWJ_PGO_PROFDATA} applied to the generated guest code")
+endif()
 
 # GPU_PLUGINS xenos stages rexgpu-xenos.dll next to the executable.
 rexglue_setup_target(gowj GPU_PLUGINS xenos)
@@ -115,6 +155,20 @@ gowj_patch(mousesmooth patch_mouse_smoothing.py "Removing the guest's thumbstick
 gowj_patch(rawlook patch_raw_look.py "Injecting the mouse angle delta into the guest's look axes")
 gowj_patch(motionblur patch_motion_blur.py "Forcing the guest's radial motion blur off")
 gowj_patch(gamepatch patch_game_patches.py "Applying the game patches")
+
+# The GPU plugin with the upscaler support (scripts/build-gpu.ps1 builds it into out/gpu). When it is
+# there, it replaces the stock rexruntime.dll / rexgpu-xenos.dll that the SDK stages next to the exe.
+set(GOWJ_GPU_DIR "${CMAKE_CURRENT_SOURCE_DIR}/out/gpu" CACHE PATH "Folder with the patched rexruntime.dll and rexgpu-xenos.dll")
+if(EXISTS "${GOWJ_GPU_DIR}/rexgpu-xenos.dll" AND EXISTS "${GOWJ_GPU_DIR}/rexruntime.dll")
+    add_custom_command(TARGET gowj POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${GOWJ_GPU_DIR}/rexgpu-xenos.dll" $<TARGET_FILE_DIR:gowj>
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${GOWJ_GPU_DIR}/rexruntime.dll" $<TARGET_FILE_DIR:gowj>
+        COMMENT "Using the GPU plugin with DLSS / FSR support from ${GOWJ_GPU_DIR}"
+        VERBATIM)
+    message(STATUS "GPU plugin with upscaler support: ${GOWJ_GPU_DIR}")
+else()
+    message(STATUS "GPU plugin with upscaler support: not built (run scripts/build-gpu.ps1); the stock SDK plugin is used")
+endif()
 
 # A patcher that rewrites an already-compiled file after ninja planned its work would link a
 # stale object and still report success. This check fails the build in that case; build again.

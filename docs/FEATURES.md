@@ -92,7 +92,7 @@ What you will find there that this project added, by category:
 **mnk** (keyboard and mouse): see the next section.
 
 **GPU / Display**: standard graphics settings of the runtime that matter most:
-`draw_resolution_scale_x` and `_y` (internal resolution, 1 or 2), `anisotropic_override`
+`draw_resolution_scale_x` and `_y` (internal resolution; always 1 in this release), `anisotropic_override`
 (0 to 5, texture filtering up to 16x), `native_2x_msaa`, the `texture_cache_memory_limit_*`
 sizes, `render_target_path_d3d12`, `fullscreen`, `present_dither`.
 
@@ -130,12 +130,37 @@ releases or recaptures it; it is released automatically when the window loses fo
 **moving the mouse** steps up/down/left/right (`mnk_menu_mouse_step`, default 120 pixels per step),
 **left click** accepts and **right click** goes back (`mnk_menu_mouse_nav`).
 
-**Rebinding.** The keys are listed under the Input categories in F4 (`keybind_*`). Add a line such as
-`keybind_a = "Space,E"` to `config/gowj.toml` to rebind.
+**Real keyboard input.** In play the keyboard and mouse are not turned into a virtual gamepad. Key and
+mouse-button events are handed to the game's own input system (the same entry point a controller's
+buttons go through), so the engine's built-in key bindings drive the game: movement, cover, aiming,
+reload, melee and the rest. The engine's keyboard binding table is rewritten from your settings (in a
+cached copy of your own game file; the game folder is never changed), which is what makes every key
+rebindable. Debug and cheat commands that share that table are removed from any key you use.
+When you last touched a controller the game keeps its controller behaviour (rumble, controller
+hints); touching the keyboard or mouse switches back.
+
+**Rebinding.** Open **Graphics Settings.exe** and press **Key bindings**: click an action, then press
+the new key or mouse button (wheel notches work too); right-click an action to add a second key,
+**Delete** clears it, **Esc** cancels. Or edit `config/gowj.toml`; every action has a line such as
+`bind_reload = "R,ThumbMouseButton"` (keys separated by commas). The actions are `bind_forward`,
+`bind_backward`, `bind_left`, `bind_right`, `bind_action`, `bind_crouch`, `bind_walk`, `bind_fire`,
+`bind_aim`, `bind_melee`, `bind_reload`, `bind_zoom`, `bind_swap_weapon`, `bind_grenade`,
+`bind_pickup`, `bind_poi`, `bind_tactical`, `bind_weapon1`, `bind_weapon2`, `bind_scoreboard`. The
+key names are listed in the Controls section of the config file. Escape always pauses.
+`mnk_native = false` goes back to the older virtual-gamepad scheme (`keybind_*` settings).
+
+**Menu prompts.** The button prompts in menus read `[Enter]`, `[Esc]` and so on instead of controller
+buttons (`gowj_prompts`: `auto` = keyboard names unless a controller is connected at launch,
+`keyboard`, `controller`). The small button pictures inside some in-game hints are game artwork and
+remain controller icons.
+
+**Comfort.** `gowj_fov` sets the field of view of the everyday camera modes (the game uses 80;
+aiming keeps its own zoom). `gowj_no_camera_shake = true` removes the roadie-run camera shake.
+Both are also in Graphics Settings.
 
 ## Image quality: SMAA and FSR
 
-The game renders at 1280x720 (or 2560x1440 on the High quality level). A final pass on the graphics
+The game renders at 1280x720 on every quality level. A final pass on the graphics
 card then improves that image before it reaches your screen:
 
 1. **SMAA 1x** finds edges and smooths them. The original game's anti-aliasing is weak, and this
@@ -148,6 +173,55 @@ card then improves that image before it reaches your screen:
 All three can be switched off separately (`gowj_smaa`, `gowj_fsr_easu`, `gowj_fsr`). The pass costs about
 a millisecond or less on a desktop card. It is skipped while the F4 menu or the console is open.
 
+## Upscalers: DLSS and FSR (not in this release)
+
+Temporal upscaling with DLSS, FSR 3.1 and FSR 4 is paused. At the render sizes the game can draw cleanly (720p, or 1440p on a
+4K screen) it flickered textures while moving, so it was taken out of the release until that is fixed. The code is still in
+the repository behind one switch (`kTemporalUpscalers` in `src/gowj_quality.h`), the settings window has no Upscaling card, and
+the vendor libraries are not shipped. The older single-frame **SMAA + FSR 1.0** options above are unaffected.
+
+## Low level: lighter game settings
+
+On the **Low** quality level only, the engine's own renderer switches are turned off. This removes a
+large part of the work on weak graphics cards and handhelds. It is not applied on Medium or High, and
+not when the level is Auto and Auto picks Medium or High.
+
+Turned off: dynamic and static decals, dynamic lights and shadows, light-environment shadows, spherical
+harmonic secondary lighting, motion blur, depth of field, ambient occlusion, bloom, light shafts,
+distortion, SpeedTree leaves and fronds, lens flares, fog volumes, floating-point render targets,
+radial blur, subsurface scattering, image reflections, separate translucency, dynamic iris and textured
+fog. Detail mode goes from 2 to 1 and the engine's anisotropy setting to 0 (the filtering you pick in
+Graphics Settings still applies).
+
+How it works: the game keeps these switches in its `Coalesced_*.bin` files. On Low, the program reads
+your own copies, changes those values, and saves the result in
+`%LOCALAPPDATA%\GearsOfWarJudgmentPC\cache\coalesced`. The game is then pointed at the saved copy. **Nothing
+in your game folder is modified**, and on Medium and High the game reads its normal files. To turn it
+off while staying on Low, switch off *Low level: lighter game settings* in Graphics Settings
+(`gowj_low_end_tweaks = false`, or the variable `GOWJ_LOW_END=0`). The setting list follows a community
+low-end Coalesced mod for Xenia from ModDB.
+
+## Draw distance
+
+The game hides objects beyond a per-object distance. A scale on that distance is the single biggest
+speed-up for slow processors, because every object that is not drawn is also not processed. Measured on
+the Low level in a street scene on a Ryzen 7 5800X3D (processor limited, frame limiter and vsync off):
+
+| Draw distance | Frames per second | Look |
+|---|---|---|
+| 1.0 (the game's own) | 104 | reference |
+| 0.8 | 113 | same |
+| 0.6 | 123 | same in the test street |
+| 0.5 (Low default) | about 140 | far props start to thin out |
+| 0.4 | 159 | distant props missing, effects reduced |
+| 0.3 | 198 | effects such as the burning tree start to disappear |
+
+On a scene where the graphics card was the limit a scale of 0.6 raised 62.7 to 70.2 fps, and a
+scale of 1.5 lowered it to 59.9. `gowj_draw_distance = "auto"` uses 0.5 on Low, 0.75 on Medium and the
+game's own distance on High; set a number in quotes (`"0.4"` ... `"1.5"`) or use *Draw distance* in
+Graphics Settings (Short / Normal / Far). It is applied through the same cached copy of your own game
+file as the Low level settings; the game folder is not changed.
+
 ## Automatic quality
 
 Every time the game starts it looks at your graphics card and picks a level:
@@ -156,7 +230,7 @@ Every time the game starts it looks at your graphics card and picks a level:
 |---|---|---|---|---|
 | **low** | 1280x720 | off | 4x | integrated or handheld GPU, or under 3.5 GB of video memory |
 | **medium** | 1280x720 | on | 8x | a graphics card with under 11 GB of video memory, or any non-NVIDIA card |
-| **high** | 2560x1440 | on | 16x | an NVIDIA card with 12 GB or more, on a 1080p-or-larger screen |
+| **high** | 1280x720 | on | 16x | an NVIDIA card with 12 GB or more, on a 1080p-or-larger screen |
 
 Texture-cache size and the number of background pipeline-compile threads also follow the level and
 your hardware (video memory budget and CPU core count). FSR upscaling is on at every level.
@@ -213,6 +287,17 @@ progress as corrupted). Saves are kept in the `saves` folder next to the program
 - **Logs.** A log per run is written to `logs`. Include the newest one in a bug report. If the program
   crashes, `gowj_crash.log` is written next to it.
 - **Game folder.** The first run asks for your game folder and remembers it in `gowj_game_path.txt`.
+
+**Out-of-bounds reads.** The console's memory is flat, so code that reads a few bytes past the end of a
+buffer works there. On a PC that read can land on a page that is not mapped. One routine in the game does this
+during start (guest address 0xBF5D0000, found from the crash report registers), which closed the game roughly one
+launch in six. A read of an unmapped or no-access page just past a buffer now returns zeros, as on the console.
+Writes, reads near address zero and every other fault are untouched and still end in a crash report
+(`gowj_crash.log`, with registers and the failing instruction). `GOWJ_OVERREAD_GUARD=0` turns the guard off.
+
+**Mouse-friendly camera and quiet screen.** `gowj_mouse_camera = true` stops the camera re-centring its pitch by
+itself while you move, turns off the engine's own mouse smoothing (the mouse path here is already direct), and hides
+the engine's on-screen developer messages. `gowj_skip_logos = true` (or *Skip startup logo movie* in Graphics Settings) skips the startup logo movie.
 
 ## Advanced switches
 

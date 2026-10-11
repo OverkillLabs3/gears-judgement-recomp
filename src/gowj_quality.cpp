@@ -19,12 +19,14 @@
 #include <dxgi1_4.h>
 
 #include <algorithm>
+#include <cmath>
 #include <atomic>
 #include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <mutex>
+#include <cstdlib>
 #include <string>
 #include <thread>
 #include <vector>
@@ -34,6 +36,9 @@
 #include <rex/cvar.h>
 #include <rex/logging.h>
 
+REXCVAR_DEFINE_BOOL(gowj_low_end_tweaks, true, "gfx",
+                    "Low level only: switch off the game's lights, shadows, decals and post effects "
+                    "(applied to a cached copy of the game's own config; Medium and High never use it)");
 REXCVAR_DEFINE_STRING(gowj_quality, "auto", "gfx",
                       "Graphics quality tier: auto (probe the GPU, step down if 60 fps is not "
                       "held), low (handheld / integrated), medium, high.");
@@ -157,20 +162,32 @@ std::wstring UserDir() {
 
 // autotune.ini: "gpu=<name>" and "offset=<-N>" (how many tiers below the probe's pick this
 // GPU has been measured to need).
-int ReadOffset(const std::string& gpu) {
+struct TuneState {
+  std::string gpu;
+  int offset = 0;
+  int dd_steps = 0;  // how many times draw distance has been shortened for this GPU
+};
+
+TuneState ReadTune() {
   std::ifstream in(UserDir() + L"\\autotune.ini");
-  std::string line, g;
-  int off = 0;
+  std::string line;
+  TuneState t;
   while (std::getline(in, line)) {
-    if (line.rfind("gpu=", 0) == 0) g = line.substr(4);
-    if (line.rfind("offset=", 0) == 0) off = std::atoi(line.c_str() + 7);
+    if (line.rfind("gpu=", 0) == 0) t.gpu = line.substr(4);
+    if (line.rfind("offset=", 0) == 0) t.offset = std::atoi(line.c_str() + 7);
+    if (line.rfind("dd=", 0) == 0) t.dd_steps = std::atoi(line.c_str() + 3);
   }
-  return (g == gpu && off < 0) ? off : 0;
+  return t;
 }
 
-void WriteOffset(const std::string& gpu, int off) {
+int ReadOffset(const std::string& gpu) {
+  const TuneState t = ReadTune();
+  return (t.gpu == gpu && t.offset < 0) ? t.offset : 0;
+}
+
+void WriteTune(const std::string& gpu, int off, int dd) {
   std::ofstream out(UserDir() + L"\\autotune.ini", std::ios::trunc);
-  out << "gpu=" << gpu << "\noffset=" << off << "\n";
+  out << "gpu=" << gpu << "\noffset=" << off << "\ndd=" << dd << "\n";
 }
 
 struct Tier {
@@ -184,7 +201,7 @@ struct Tier {
 constexpr Tier kTiers[3] = {
     {"low", 1, false, 3, false, 512, 1024, 64},
     {"medium", 1, true, 4, true, 1024, 2048, 128},
-    {"high", 2, true, 5, true, 2048, 4096, 128},
+    {"high", 1, true, 5, true, 2048, 4096, 128},
 };
 
 std::mutex g_mu;
@@ -196,7 +213,8 @@ bool g_managed = false;
 
 }  // namespace
 
-QualityPlan ChooseQualityPlan(uint32_t monitor_height, const std::filesystem::path& config_path) {
+QualityPlan ChooseQualityPlan(uint32_t monitor_height, const std::filesystem::path& config_path,
+                              uint32_t monitor_width) {
   QualityPlan q;
   int idx = -1;
   try {
@@ -267,10 +285,91 @@ QualityPlan ChooseQualityPlan(uint32_t monitor_height, const std::filesystem::pa
   }
 
   const Tier& t = kTiers[tier];
+  // Lighter engine settings: Low tier only (explicit, automatic or tuned), never Medium or High.
+  q.low_end = tier == 0;
+  if (q.low_end) {
+    std::string opt = config_path.empty() ? std::string() : Lower(ConfigValue(config_path, "gowj_low_end_tweaks"));
+    char e[8]{};
+    if (GetEnvironmentVariableA("GOWJ_LOW_END", e, sizeof(e))) opt = e[0] == '0' ? "false" : "true";
+    if (opt == "false") q.low_end = false;
+  }
   q.tier = tier;
   q.tier_name = t.name;
   q.scale = t.scale;
   q.smaa = t.smaa;
+  {
+    // A temporal upscaler renders the scene below the output size and reconstructs the rest, so
+    // the target (internal resolution scale) follows the display: 1 -> 720p, 2 -> 1440p, 3 -> 4K.
+    std::string up = config_path.empty() ? std::string() : Lower(ConfigValue(config_path, "gowj_upscaler"));
+    if (kTemporalUpscalers && !up.empty() && up != "off") {
+      q.upscaler = true;
+      q.smaa = false;  // the upscaler already resolves aliasing
+      // The whole game frame is drawn at the render size and the upscaler scales the finished frame
+      // to the screen, so a smaller render size is what makes it faster. Only sizes the game draws
+      // cleanly are used: 1440p is its 2x resolution scale, 1080p and 720p are native guest sizes
+      // (3x was measured to be slow and to put blue speckle over the picture).
+      int mode = -1;
+      if (!config_path.empty()) {
+        const std::string m = ConfigValue(config_path, "gowj_upscale_quality");
+        if (!m.empty()) mode = std::atoi(m.c_str());
+      }
+      if (mode < 0) mode = tier == 0 ? 3 : tier == 1 ? 0 : 2;  // Auto: Low / Medium / High
+      if (mode != 0 && mode != 3) mode = 2;                     // anything else is Quality
+      q.upscale_mode = mode;
+      // The render size follows the screen, so every screen gets the same quality / performance /
+      // ultra performance ratios: two thirds, one half and one third of the output height. On a 4K
+      // panel that is exactly 1440p (the game's 2x scale), 1080p and 720p; on a 1440p panel it is
+      // 960p, 720p and 480p; on a 1080p panel 720p, 540p and 360p.
+      const double ratio = mode == 2 ? 2.0 / 3.0 : mode == 0 ? 0.5 : 1.0 / 3.0;
+      const uint32_t out_h = monitor_height ? monitor_height : 1080;
+      const uint32_t out_w = monitor_width ? monitor_width : (out_h * 16 + 8) / 9;
+      const double aspect = double(out_w) / double(out_h);
+      uint32_t rh = uint32_t(out_h * ratio + 0.5);
+      // The game cannot draw below its native 720p (below that its own surface-size check stops it:
+      // measured, a 960x540 target aborts), and above ~2.1 million pixels the EDRAM tiling breaks, so
+      // the height is clamped to what is proven: 720 .. 1080 for 16:9, less for very wide screens.
+      // Measured on screenshots: guest render targets over about 1.3 million pixels (1712x960, 1920x1080,
+      // 2560x720, 2736x768) come out corrupted (garbage bands, black lower half). The sizes that render
+      // correctly are the native 1280x720, wider 720-high targets up to 1792 wide, and the 2x scale
+      // (1440p). So the render height is either 720 or, on a 16:9-ish screen asking for 1440p, 1440.
+      if (!(rh >= 1400 && rh <= 1460 && aspect < 1.9)) rh = 720;
+      rh = std::min<uint32_t>(rh, 1460);
+      // An upscaler needs a real size difference to be worth it: on a screen barely larger than 720p
+      // the game is drawn natively (SMAA and the final-image pass) instead.
+      if (out_h < uint32_t(rh * 1.2)) {
+        q.upscaler = false;
+        q.smaa = t.smaa;
+        q.reason += "; screen too small for upscaling (output " + std::to_string(out_h) + "p vs render " +
+                    std::to_string(rh) + "p) -> native";
+      } else {
+        // Sizes the game already draws are used as they are: 720p is its own native size and 1440p
+        // is its proven 2x scale. Anything else is a guest render target override.
+        q.scale = 1;
+        q.render_w = q.render_h = 0;
+        if (rh >= 1400 && rh <= 1460 && aspect < 1.9) {
+          q.scale = 2;
+        }
+        // No other guest render size is used: every override measured so far (1712x720 included) shows
+        // corrupted bands. Wider screens get the native 16:9 picture with side bars.
+      }
+      q.render_final_h = rh;
+      // Measured on screen captures while walking: DLSS flickers the textures when it has to upscale by
+      // more than about 2.5x (720p to 4K: sharpness swings in 6% of frames at 8% or more, against 0.2% at
+      // 2x and nothing at 1.5x), while FSR 3.1 at the same ratio is steady and a little faster. Those
+      // sizes use FSR 3.1 for the session instead; DLSS stays for every other ratio.
+      if ((up == "dlss" || up == "auto") && rh && double(out_h) / double(rh) > 2.5) {
+        q.upscaler_override = "fsr3";
+        q.reason += "; DLSS would upscale " + std::to_string(rh) + "p to " + std::to_string(out_h) +
+                    "p (more than 2.5x) and flickers, so FSR 3.1 is used";
+      }
+    }
+  }
+  {
+    // Never rasterize more than 1440p worth of pixels: above that the EDRAM scaling breaks and puts blue
+    // speckle over the picture (measured at a 3840x2160 render target).
+    const double gw = q.render_w ? q.render_w : 1280.0, gh = q.render_h ? q.render_h : 720.0;
+    if (q.scale > 1 && gw * gh * q.scale * q.scale > 3.8e6) q.scale = 1;
+  }
   q.fsr = true;
   q.aniso = t.aniso;
   q.msaa2x = t.msaa2x;
@@ -287,10 +386,11 @@ QualityPlan ChooseQualityPlan(uint32_t monitor_height, const std::filesystem::pa
   q.summary = fmt::format(
       "QUALITY gpu='{}' vendor={:04X} vram={}MB budget={}MB uma={} rov={} cores={} monitor_h={} "
       "-> tier={} ({}) scale={} smaa={} aniso={} msaa2x={} tex={}/{}/{}MB pso_threads={} rov_path={} "
-      "[{}: {}]",
+      "upscaler={} mode={} guest_render={}x{} [{}: {}]",
       q.gpu_name, q.vendor, q.vram_mb, q.budget_mb, q.uma, q.rov_supported, q.cores,
       monitor_height, q.tier, q.tier_name, q.scale, q.smaa, q.aniso, q.msaa2x, q.tex_soft_mb,
-      q.tex_hard_mb, q.tex_rt_mb, q.pso_threads, q.rov, q.source, q.reason);
+      q.tex_hard_mb, q.tex_rt_mb, q.pso_threads, q.rov, q.upscaler, q.upscale_mode, q.render_w,
+      q.render_h, q.source, q.reason);
   return q;
 }
 
@@ -306,6 +406,11 @@ void QualityNoteFrame(uint64_t interval_us) {
   if (g_win.size() < 20000) g_win.push_back(interval_us / 1000.0);
 }
 
+int QualityDrawDistanceSteps(const std::string& gpu) {
+  const TuneState t = ReadTune();
+  return (t.gpu == gpu && t.dd_steps > 0) ? std::min(t.dd_steps, 2) : 0;
+}
+
 std::string QualityOverlayLine() {
   std::lock_guard<std::mutex> lk(g_mu);
   if (!g_notice.empty()) return g_notice;
@@ -318,7 +423,7 @@ void QualityStartTuner(const QualityPlan& plan, bool managed) {
   if (started) return;
   started = true;
   g_managed = managed;
-  if (!managed || plan.tier <= 0 || plan.source.rfind("override", 0) == 0) {
+  if (!managed || plan.source.rfind("override", 0) == 0) {
     REXLOG_INFO("QUALITY tuner off (managed={} tier={} source={})", managed, plan.tier,
                 plan.source);
     return;
@@ -364,22 +469,35 @@ void QualityStartTuner(const QualityPlan& plan, bool managed) {
       const double p95 = w[std::min(w.size() - 1, size_t(w.size() * 0.95))];
       // p50: cannot hold 60 at all. p95: holds it on average but more than 1 frame in 20 is
       // late (a 33 ms miss under the 60 Hz pacer) - the "drops in heavy scenes" case that a
-      // median never sees (measured 2026-10-03: High on the 5070 Ti stuttered, Low did not).
+      // median never sees (measured High on the 5070 Ti stuttered, Low did not).
       const bool miss = p50 > 18.5 || p95 > 20.0;
       fails = miss ? fails + 1 : 0;
       REXLOG_INFO("QUALITY window: {} frames p50={:.1f}ms p95={:.1f}ms p99={:.1f}ms -> {} (fails={})",
                   w.size(), p50, p95, p99, miss ? "below 60fps" : "ok", fails);
       if (fails >= 3) {
-        const int new_off = std::min(g_offset, 0) - 1;
-        WriteOffset(plan.gpu_name, new_off);
-        const std::string msg =
-            std::string("60 fps not held at ") + plan.tier_name +
-            " - quality will be lowered on next launch";
+        const TuneState cur = ReadTune();
+        const int dd = cur.gpu == plan.gpu_name ? cur.dd_steps : 0;
+        std::string msg;
+        int new_off = std::min(g_offset, 0);
+        int new_dd = dd;
+        if (dd < 2) {
+          // First step: draw less far. It costs the least picture and often fixes a CPU-bound scene.
+          new_dd = dd + 1;
+          msg = "60 fps not held - draw distance will be shortened on next launch";
+        } else if (plan.tier > 0) {
+          new_off = new_off - 1;
+          new_dd = 0;  // the lower tier starts again from its own draw distance
+          msg = std::string("60 fps not held at ") + plan.tier_name + " - quality will be lowered on next launch";
+        } else {
+          REXLOG_INFO("QUALITY lowest tier and shortest draw distance already in use");
+          return;
+        }
+        WriteTune(plan.gpu_name, new_off, new_dd);
         {
           std::lock_guard<std::mutex> lk(g_mu);
           g_notice = msg;
         }
-        REXLOG_WARN("QUALITY {} (offset {} saved)", msg, new_off);
+        REXLOG_WARN("QUALITY {} (offset {} dd {} saved)", msg, new_off, new_dd);
         return;  // one step per session; the next launch re-measures
       }
     }

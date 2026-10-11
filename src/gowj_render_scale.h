@@ -2,7 +2,7 @@
  * @file        gowj_render_scale.h
  * @brief       Host-controlled guest render resolution
  *
- * Measured 2026-09-24: sub_82990A28 (gowj_recomp.206.cpp:16700) is the ONLY writer
+ * Measured: sub_82990A28 (gowj_recomp.206.cpp:16700) is the ONLY writer
  * of the engine's two render-size globals. It stores a literal 720 into the height
  * word and clamps the width it computes into [904, 1280]. Everything else in the
  * title - the ~40 readers of those words, the present parameters built moments

@@ -4,7 +4,7 @@
 //
 // The blur the player sees is not any of the script-driven settings patched in
 // gowj_motion_blur.cpp (measured: those fire a handful of times with 0 and the
-// blur persists). It lives in guest pixel shaders, identified 2026-09-25 from a
+// blur persists). It lives in guest pixel shaders, identified from a
 // dump_shaders capture of Act 1 gameplay while roadie-running:
 //
 //  * shader_AFC5FBDDD9358F1C - the only pixel shader in the game with a sampling
@@ -376,7 +376,7 @@ void InstallBlurKill() {
   if (started) return;
   started = true;
   std::thread([] {
-    // Measured 2026-10-03: the first release test hitched for 0.3-0.8 s with no
+    // Measured: the first release test hitched for 0.3-0.8 s with no
     // game activity logged; a pass here reads several GB of guest memory, so it
     // must not keep running once its job is done.
     const uint32_t all = (1u << (sizeof(kTargets) / sizeof(kTargets[0]))) - 1;

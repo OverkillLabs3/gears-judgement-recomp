@@ -104,6 +104,15 @@ foreach ($f in 'GearsOfWarJudgment.exe', 'Graphics Settings.exe') {
     Copy-Item $src $pkg
 }
 
+# The official upscaler libraries (put into out\gpu by build-gpu.ps1) sit next to the exes, where the
+# game and the settings window look for them. Without build-gpu.ps1 there are none and the upscaler
+# options simply do nothing.
+# Upscalers are switched off in this release (kTemporalUpscalers in src/gowj_quality.h), so their libraries are not shipped.
+foreach ($dll in @()) {
+    $src = Join-Path $root "out\gpu\$dll"
+    if (Test-Path $src) { Copy-Item $src $pkg }
+}
+
 Write-Host "`nDone. Release files: $pkg" -ForegroundColor Green
 Write-Host '  GearsOfWarJudgment.exe   the game, one self-contained file (no installer, nothing to download)'
 Write-Host '  Graphics Settings.exe    settings window; keep it in the same folder as the game exe'

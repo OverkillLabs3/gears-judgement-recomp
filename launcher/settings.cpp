@@ -11,6 +11,7 @@
 //   Graphics Settings.exe --apply key=value [key=value ...]    writes settings without a window
 
 #include <windows.h>
+#include "../src/gowj_keys.h"
 #include <windowsx.h>
 #include <dwmapi.h>
 #include <shellapi.h>
@@ -170,10 +171,12 @@ std::string Num(double v, int decimals) {
 // the settings
 // ------------------------------------------------------------------------------------------
 enum Id {
-  kQuality, kResolution, kFiltering, kFullscreen,
+  kQuality, kResolution, kFiltering, kFullscreen, kLowEnd,
+  kUpscaler, kUpscaleMode,
   kSmaa, kFsr, kSharpness, kGrain, kBlur,
   kLimit, kVrr,
   kSens, kInvert,
+  kPrompts, kFov, kShake, kDrawDist, kSkipLogos,
   kCount
 };
 enum class Kind { Segmented, Toggle, Slider };
@@ -204,9 +207,150 @@ struct Card {
 Ctl g_c[kCount];
 std::vector<Card> g_cards;
 
+// ------------------------------------------------------------------------------------------
+// key bindings page
+// ------------------------------------------------------------------------------------------
+struct BindDef {
+  const wchar_t* label;
+  const char* toml;
+  const char* def;  // default key list, engine key names
+};
+const BindDef kBinds[] = {
+    {L"Move forward", "bind_forward", "W"},
+    {L"Move backward", "bind_backward", "S"},
+    {L"Move left", "bind_left", "A"},
+    {L"Move right", "bind_right", "D"},
+    {L"Cover, vault, roll, sprint", "bind_action", "SpaceBar"},
+    {L"Crouch", "bind_crouch", "LeftControl,C"},
+    {L"Walk", "bind_walk", "Z"},
+    {L"Fire", "bind_fire", "LeftMouseButton"},
+    {L"Aim", "bind_aim", "RightMouseButton"},
+    {L"Melee, execute", "bind_melee", "F,V"},
+    {L"Reload", "bind_reload", "R,ThumbMouseButton"},
+    {L"Zoom", "bind_zoom", "T,MiddleMouseButton"},
+    {L"Swap weapons", "bind_swap_weapon", "One,MouseScrollUp,MouseScrollDown"},
+    {L"Grenade", "bind_grenade", "Two"},
+    {L"Pick up, revive, use", "bind_pickup", "E"},
+    {L"Look at point of interest", "bind_poi", "Q"},
+    {L"Tactical command", "bind_tactical", "H"},
+    {L"Weapon slot 1", "bind_weapon1", "Three"},
+    {L"Weapon slot 2", "bind_weapon2", "Four"},
+    {L"Scoreboard", "bind_scoreboard", "Slash"},
+};
+constexpr int kBindCount = int(sizeof(kBinds) / sizeof(kBinds[0]));
+std::vector<std::string> g_bind_keys[kBindCount];
+bool g_bind_dirty = false;
+int g_page = 0;                 // 0 = settings, 1 = key bindings
+int g_capture = -1;             // binding being captured
+bool g_capture_add = false;     // add a key instead of replacing
+bool g_capture_swallow = false; // the click that started the capture is still going
+int g_hover_bind = -1;
+RectF g_bind_rect[kBindCount];
+
+std::vector<std::string> SplitKeys(const std::string& list) {
+  std::vector<std::string> out;
+  size_t pos = 0;
+  while (pos <= list.size()) {
+    const size_t comma = list.find(',', pos);
+    std::string k = list.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
+    while (!k.empty() && k.front() == ' ') k.erase(k.begin());
+    while (!k.empty() && k.back() == ' ') k.pop_back();
+    if (!k.empty()) out.push_back(k);
+    if (comma == std::string::npos) break;
+    pos = comma + 1;
+  }
+  return out;
+}
+
+std::string JoinKeys(const std::vector<std::string>& v) {
+  std::string s;
+  for (const auto& k : v) {
+    if (!s.empty()) s += ",";
+    s += k;
+  }
+  return s;
+}
+
+std::wstring FriendlyKey(const std::string& k) {
+  static const struct { const char* n; const wchar_t* f; } kMap[] = {
+      {"SpaceBar", L"Space"}, {"LeftShift", L"Left Shift"}, {"RightShift", L"Right Shift"},
+      {"LeftControl", L"Left Ctrl"}, {"RightControl", L"Right Ctrl"}, {"LeftAlt", L"Left Alt"},
+      {"RightAlt", L"Right Alt"}, {"LeftMouseButton", L"Left click"},
+      {"RightMouseButton", L"Right click"}, {"MiddleMouseButton", L"Middle click"},
+      {"ThumbMouseButton", L"Mouse 4"}, {"ThumbMouseButton2", L"Mouse 5"},
+      {"MouseScrollUp", L"Wheel up"}, {"MouseScrollDown", L"Wheel down"}, {"One", L"1"}, {"Two", L"2"},
+      {"Three", L"3"}, {"Four", L"4"}, {"Five", L"5"}, {"Six", L"6"}, {"Seven", L"7"},
+      {"Eight", L"8"}, {"Nine", L"9"}, {"Zero", L"0"}, {"BackSpace", L"Backspace"},
+      {"Slash", L"/"}, {"Backslash", L"\\"}, {"Comma", L","}, {"Period", L"."}, {"Semicolon", L";"},
+      {"Quote", L"'"}, {"LeftBracket", L"["}, {"RightBracket", L"]"}, {"Equals", L"="},
+      {"Underscore", L"-"}, {"PageUp", L"Page Up"}, {"PageDown", L"Page Down"},
+  };
+  for (const auto& m : kMap)
+    if (k == m.n) return m.f;
+  return std::wstring(k.begin(), k.end());
+}
+
+std::wstring BindText(int i) {
+  if (g_capture == i) return g_capture_add ? L"Press a key to add..." : L"Press a key or mouse button...";
+  std::wstring s;
+  for (const auto& k : g_bind_keys[i]) {
+    if (!s.empty()) s += L"   ";
+    s += FriendlyKey(k);
+  }
+  return s.empty() ? L"(none)" : s;
+}
+
+void LoadBinds() {
+  for (int i = 0; i < kBindCount; ++i) {
+    std::string v;
+    g_bind_keys[i] = SplitKeys(GetValue(kBinds[i].toml, &v) && !v.empty() ? v : std::string(kBinds[i].def));
+  }
+  g_bind_dirty = false;
+}
+
+void ApplyBinds() {
+  if (!g_bind_dirty) return;
+  for (int i = 0; i < kBindCount; ++i) {
+    const std::string now = JoinKeys(g_bind_keys[i]);
+    if (now == kBinds[i].def) RemoveKey(kBinds[i].toml);
+    else SetValue(kBinds[i].toml, "\"" + now + "\"");
+  }
+  g_bind_dirty = false;
+}
+
+// Gives `key` to binding `i` (replace or add); a key can only do one thing, so it is taken away
+// from any other action that had it.
+void AssignKey(int i, const std::string& key, bool add) {
+  for (int j = 0; j < kBindCount; ++j) {
+    if (j == i) continue;
+    auto& v = g_bind_keys[j];
+    v.erase(std::remove(v.begin(), v.end(), key), v.end());
+  }
+  auto& mine = g_bind_keys[i];
+  if (!add) mine.clear();
+  if (std::find(mine.begin(), mine.end(), key) == mine.end()) mine.push_back(key);
+  g_bind_dirty = true;
+}
+
+// Windows key message -> engine key name ("" if not offered). Left/right modifiers are told apart
+// from the scan code and the extended-key bit.
+std::string KeyFromMessage(WPARAM w, LPARAM l) {
+  int vk = int(w);
+  const int scan = (l >> 16) & 0xFF;
+  const bool ext = ((l >> 24) & 1) != 0;
+  if (vk == VK_SHIFT) vk = MapVirtualKeyW(scan, MAPVK_VSC_TO_VK_EX);
+  else if (vk == VK_CONTROL) vk = ext ? VK_RCONTROL : VK_LCONTROL;
+  else if (vk == VK_MENU) vk = ext ? VK_RMENU : VK_LMENU;
+  for (const rex::glue::KeyName& k : rex::glue::kKeyTable)
+    if (k.vk == vk) return k.name;
+  return {};
+}
+
 void InitControls() {
   g_c[kQuality] = {kQuality, Kind::Segmented, L"Quality level",
-                   L"Picking a level sets resolution, texture filtering and SMAA below to match it. Auto picks from your graphics card and lowers itself if 60 fps is not held. Low: 720p, no SMAA, 4x. Medium: 720p, SMAA, 8x. High: 1440p, SMAA, 16x."};
+                   L"Picking a level sets resolution, texture filtering and SMAA below to match it. Auto picks from your graphics card and lowers itself if 60 fps is not held. Low: no SMAA, 4x, and lighter game settings (see below). Medium: SMAA, 8x. High: SMAA, 16x. The game renders at 720p on every level."};
+  g_c[kLowEnd] = {kLowEnd, Kind::Toggle, L"Low level: lighter game settings",
+                  L"Only used on the Low level. Switches off the game's dynamic lights, shadows, decals, bloom, depth of field, ambient occlusion and other post effects to run on weak graphics cards and handhelds. It is applied to a copy of your own game file in the cache; your game folder is never changed. Medium and High are not affected."};
   g_c[kQuality].items = {L"Auto", L"Low", L"Medium", L"High"};
   g_c[kResolution] = {kResolution, Kind::Segmented, L"Internal resolution",
                       L"The resolution the game renders at before it is scaled to your screen. Auto follows the quality level. 2x is sharper and needs a much faster graphics card."};
@@ -214,12 +358,18 @@ void InitControls() {
   g_c[kFiltering] = {kFiltering, Kind::Segmented, L"Texture filtering",
                      L"Keeps ground and walls sharp at a slant. Auto follows the quality level."};
   g_c[kFiltering].items = {L"Auto", L"4x", L"8x", L"16x"};
+  g_c[kUpscaler] = {kUpscaler, Kind::Segmented, L"Upscaler",
+                    L"Renders the scene below your screen's resolution and reconstructs a sharp picture from several frames. DLSS needs an NVIDIA RTX card. FSR 3.1 works on any graphics card. FSR 4 is for Radeon RX 9000 cards; other cards use FSR 3.1. The frame size, anti-aliasing and scaling are then done by the upscaler, so those options disappear."};
+  g_c[kUpscaler].items = {L"Off", L"DLSS", L"FSR 3.1", L"FSR 4"};
+  g_c[kUpscaleMode] = {kUpscaleMode, Kind::Segmented, L"Upscale mode",
+                       L"How big the game's picture is before the upscaler enlarges it to your screen. Quality draws it at 1440p, Performance at 1080p, Ultra Performance at 720p; smaller is faster. Auto follows the quality level: Low uses Ultra Performance, Medium Performance, High Quality."};
+  g_c[kUpscaleMode].items = {L"Auto", L"Quality", L"Performance", L"Ultra Perf."};
   g_c[kFullscreen] = {kFullscreen, Kind::Toggle, L"Fullscreen", L"Borderless fullscreen. Turn off to play in a window."};
   g_c[kSmaa] = {kSmaa, Kind::Segmented, L"Anti-aliasing (SMAA)",
-                L"Smooths jagged edges in the final image. Auto turns it on except on the Low level."};
+                L"Smooths jagged edges in the final image. Auto turns it on except on the Low level. Not used while DLSS or FSR 3.1 is on, because the upscaler already does this."};
   g_c[kSmaa].items = {L"Auto", L"On", L"Off"};
-  g_c[kFsr] = {kFsr, Kind::Toggle, L"FSR upscaling", L"AMD FidelityFX Super Resolution 1.0 scales the image to your screen and sharpens it. Off uses a plain stretch."};
-  g_c[kSharpness] = {kSharpness, Kind::Slider, L"FSR sharpness", L"How much FSR sharpens the picture. Lower is sharper, higher is softer."};
+  g_c[kFsr] = {kFsr, Kind::Toggle, L"Spatial upscaling (FSR 1)", L"For when the Upscaler is Off: AMD FidelityFX Super Resolution 1.0 scales the 720p or 1440p image to your screen. Off uses a plain stretch. Not used with DLSS or FSR 3.1, which do their own upscaling."};
+  g_c[kSharpness] = {kSharpness, Kind::Slider, L"Sharpness", L"How much the final image is sharpened, in every mode. Lower is sharper, higher is softer."};
   g_c[kSharpness].vmin = 0; g_c[kSharpness].vmax = 2; g_c[kSharpness].step = 0.1;
   g_c[kGrain] = {kGrain, Kind::Toggle, L"Film grain", L"The game's animated film grain. Off gives a calmer, sharper image."};
   g_c[kBlur] = {kBlur, Kind::Toggle, L"Motion blur", L"The game's motion blur. Off is the default."};
@@ -230,17 +380,40 @@ void InitControls() {
   g_c[kSens] = {kSens, Kind::Slider, L"Mouse sensitivity", L"How far the camera turns per mouse movement. In the game, F11 and F12 lower and raise it."};
   g_c[kSens].vmin = 25; g_c[kSens].vmax = 300; g_c[kSens].step = 5; g_c[kSens].unit = L"%";
   g_c[kInvert] = {kInvert, Kind::Toggle, L"Invert vertical look", L"Moving the mouse up looks down."};
+  g_c[kPrompts] = {kPrompts, Kind::Segmented, L"Menu prompts",
+                   L"What the buttons in menus are called. Auto shows keyboard names like [Enter] unless a controller is connected when the game starts. The small button pictures drawn by some in-game hints stay as they are."};
+  g_c[kPrompts].items = {L"Auto", L"Keyboard", L"Controller"};
+  g_c[kDrawDist] = {kDrawDist, Kind::Segmented, L"Draw distance",
+                    L"How far away the game still draws objects. Auto follows the quality level: Low draws half as far and Medium three quarters, which is a large speed-up on slow PCs (Low gained about 50% more frames in the test scene); High uses the game's own distance. Short is the Low setting; Far draws 50% farther than the game normally does."};
+  g_c[kDrawDist].items = {L"Auto", L"Short", L"Normal", L"Far"};
+  g_c[kFov] = {kFov, Kind::Slider, L"Field of view", L"How wide the everyday camera sees, in degrees. The game's own value is 80. Aiming keeps its own zoom."};
+  g_c[kFov].vmin = 60; g_c[kFov].vmax = 120; g_c[kFov].step = 5; g_c[kFov].unit = L"deg";
+  g_c[kSkipLogos] = {kSkipLogos, Kind::Toggle, L"Skip startup logo movie",
+                     L"Skips the logo movie that plays when the game starts, which saves about 15 seconds per launch."};
+  g_c[kShake] = {kShake, Kind::Toggle, L"Roadie-run camera shake", L"The shaking of the camera while sprinting. Off holds it steady."};
 
-  g_cards = {
-      {L"QUALITY", {kQuality, kResolution, kFiltering, kFullscreen}, 0},
-      {L"IMAGE", {kSmaa, kFsr, kSharpness, kGrain, kBlur}, 1},
-      {L"FRAME RATE", {kLimit, kVrr}, 0, L"In the game, F8 lifts and restores this limit, and F9 shows an FPS counter. Choose Unlocked here to also turn vsync off."},
-      {L"MOUSE", {kSens, kInvert}, 1, L"In the game, F11 and F12 lower and raise the sensitivity, and Insert releases the mouse."},
-  };
+  {
+    auto has = [](const wchar_t* f) { return GetFileAttributesW((g_dir + L"\\" + f).c_str()) != INVALID_FILE_ATTRIBUTES; };
+    static std::wstring note;
+    note = std::wstring(L"DLSS: ") + (has(L"nvngx_dlss.dll") ? L"nvngx_dlss.dll found" : L"nvngx_dlss.dll not found") +
+           L".  FSR: " +
+           (has(L"amd_fidelityfx_loader_dx12.dll") && has(L"amd_fidelityfx_upscaler_dx12.dll") ? L"AMD DLLs found" : L"AMD DLLs not found") +
+           L". The overlay (F9) shows what is running.";
+    // Two columns of about the same height, so no card has to stretch: picture settings on the left,
+    // frame rate, input and comfort on the right.
+    g_cards = {
+        {L"QUALITY", {kQuality, kResolution, kFiltering, kDrawDist, kLowEnd, kFullscreen, kSkipLogos}, 0},
+        {L"IMAGE", {kSmaa, kFsr, kSharpness, kGrain, kBlur}, 0},
+        {L"FRAME RATE", {kLimit, kVrr}, 1, L"In the game, F8 lifts and restores this limit, and F9 shows an FPS counter. Choose Unlocked here to also turn vsync off."},
+        {L"MOUSE", {kSens, kInvert}, 1, L"In the game, F11 and F12 lower and raise the sensitivity, and Insert releases the mouse."},
+        {L"COMFORT AND PROMPTS", {kPrompts, kFov, kShake}, 1},
+    };
+  }
 }
 
 // config -> controls
 void LoadControls() {
+  struct ForceUpscalerOff { ~ForceUpscalerOff() { g_c[kUpscaler].sel = 0; g_c[kUpscaleMode].sel = 0; } } force_off;  // upscalers are not part of this release
   std::string v;
   auto& q = g_c[kQuality];
   q.sel = 0;
@@ -255,6 +428,17 @@ void LoadControls() {
   if (GetValue("anisotropic_override", &v)) f.sel = v == "3" ? 1 : v == "4" ? 2 : v == "5" ? 3 : -1;
 
   g_c[kFullscreen].on = !GetValue("fullscreen", &v) || v != "false";
+  g_c[kLowEnd].on = !GetValue("gowj_low_end_tweaks", &v) || v != "false";
+
+  auto& up = g_c[kUpscaler];
+  up.sel = 0;
+  if (GetValue("gowj_upscaler", &v)) up.sel = v == "dlss" ? 1 : v == "fsr3" ? 2 : v == "fsr4" ? 3 : 0;
+  auto& um = g_c[kUpscaleMode];
+  um.sel = 0;  // Auto when nothing is written
+  if (GetValue("gowj_upscale_quality", &v)) {
+    const int q = atoi(v.c_str());
+    um.sel = q < 0 ? 0 : q == 0 ? 2 : q == 3 ? 3 : 1;  // anything else (older settings) is Quality
+  }
 
   auto& s = g_c[kSmaa];
   s.sel = 0;
@@ -274,6 +458,19 @@ void LoadControls() {
   const double sens = GetValue("mnk_raw_look_scale", &v) ? atof(v.c_str()) : 0.003;
   g_c[kSens].val = std::clamp(std::round(sens / 0.003 * 100.0 / 5.0) * 5.0, 25.0, 300.0);
   g_c[kInvert].on = GetValue("mnk_invert_y", &v) && v == "true";
+  {
+    auto& dd = g_c[kDrawDist];
+    dd.sel = 0;
+    if (GetValue("gowj_draw_distance", &v) && v != "auto") {
+      const double f = atof(v.c_str());
+      dd.sel = f < 0.8 ? 1 : f <= 1.2 ? 2 : 3;
+    }
+  }
+  g_c[kPrompts].sel = GetValue("gowj_prompts", &v) ? (v == "keyboard" ? 1 : v == "controller" ? 2 : 0) : 0;
+  g_c[kFov].val = GetValue("gowj_fov", &v) && atoi(v.c_str()) > 0 ? atoi(v.c_str()) : 80;
+  g_c[kShake].on = !(GetValue("gowj_no_camera_shake", &v) && v == "true");
+  g_c[kSkipLogos].on = GetValue("gowj_skip_logos", &v) && v == "true";
+  LoadBinds();
   for (auto& c : g_c) c.dirty = false;
 }
 
@@ -299,6 +496,15 @@ void ApplyControls() {
         else if (c.sel > 0) SetValue("anisotropic_override", std::to_string(c.sel + 2));
         break;
       case kFullscreen: SetValue("fullscreen", b(c.on)); break;
+      case kLowEnd: SetValue("gowj_low_end_tweaks", b(c.on)); break;
+      case kUpscaler: {
+        static const char* n[] = {"off", "dlss", "fsr3", "fsr4"};
+        if (c.sel >= 0) SetValue("gowj_upscaler", std::string("\"") + n[c.sel] + "\"");
+      } break;
+      case kUpscaleMode: {
+        static const int q[] = {-1, 2, 0, 3};
+        if (c.sel >= 0) SetValue("gowj_upscale_quality", std::to_string(q[c.sel]));
+      } break;
       case kSmaa:
         if (c.sel == 0) RemoveKey("gowj_smaa");
         else if (c.sel > 0) SetValue("gowj_smaa", b(c.sel == 1));
@@ -316,17 +522,33 @@ void ApplyControls() {
       case kVrr: SetValue("d3d12_allow_variable_refresh_rate_and_tearing", b(c.on)); break;
       case kSens: SetValue("mnk_raw_look_scale", Num(0.003 * c.val / 100.0, 5)); break;
       case kInvert: SetValue("mnk_invert_y", b(c.on)); break;
+      case kPrompts: {
+        static const char* n[] = {"auto", "keyboard", "controller"};
+        if (c.sel >= 0) SetValue("gowj_prompts", std::string("\"") + n[c.sel] + "\"");
+      } break;
+      case kFov:
+        if (int(c.val) == 80) RemoveKey("gowj_fov");
+        else SetValue("gowj_fov", std::to_string(int(c.val)));
+        break;
+      case kShake: SetValue("gowj_no_camera_shake", b(!c.on)); break;
+      case kSkipLogos: SetValue("gowj_skip_logos", b(c.on)); break;
+      case kDrawDist: {
+        static const char* n[] = {"auto", "0.5", "1.0", "1.5"};
+        if (c.sel == 0) RemoveKey("gowj_draw_distance");
+        else if (c.sel > 0) SetValue("gowj_draw_distance", std::string("\"") + n[c.sel] + "\"");
+      } break;
       default: break;
     }
     c.dirty = false;
   }
+  ApplyBinds();
 }
 
 // A quality level is a bundle: picking one also sets resolution, texture filtering and SMAA so the
 // window shows exactly what will be applied (Auto clears them and lets the game choose).
 void ApplyPreset(int level) {
   struct Preset { int res, filt, smaa; };
-  static const Preset kPresets[4] = {{0, 0, 0}, {1, 1, 2}, {1, 2, 1}, {2, 3, 1}};
+  static const Preset kPresets[4] = {{0, 0, 0}, {1, 1, 2}, {1, 2, 1}, {1, 3, 1}};
   if (level < 0 || level > 3) return;
   g_c[kQuality].sel = level;
   g_c[kQuality].dirty = true;
@@ -384,33 +606,45 @@ const Color kBg(255, 16, 18, 22), kCard(255, 24, 27, 33), kCardLine(255, 38, 42,
     kTrackHover(255, 45, 50, 60), kAccent(255, 224, 64, 38), kAccentHover(255, 240, 84, 58),
     kOff(255, 63, 69, 82), kWhite(255, 245, 246, 248), kOk(255, 90, 200, 120), kWarn(255, 240, 170, 60);
 
-constexpr float kBaseW = 900.f, kMargin = 24.f, kGap = 18.f, kHeaderH = 92.f, kFooterH = 78.f;
+constexpr float kMinW = 900.f, kMaxW = 1700.f, kMargin = 24.f, kGap = 18.f, kHeaderH = 92.f, kFooterH = 96.f;
 constexpr float kPad = 22.f, kTitleH = 44.f;
 
 HWND g_hwnd = nullptr;
 float g_scale = 1.f;
+float g_win_w = 1000.f;  // logical width; the window can be widened (never made taller)
 int g_hover_ctl = -1, g_hover_seg = -1, g_hover_btn = -1, g_drag = -1, g_press_btn = -1;
 bool g_changed = false, g_game_found = false;
 std::wstring g_status;
 Color g_status_color = kMuted;
-RectF g_btn[3];  // reset, save, play
-const wchar_t* kBtnText[3] = {L"Reset to defaults", L"Save", L"Play"};
+RectF g_btn[4];  // key bindings, reset, save, play
+const wchar_t* kBtnText[4] = {L"Key bindings", L"Reset to defaults", L"Save", L"Play"};
 float g_content_h = 0;
+
+// With DLSS or FSR on, the upscaler sets the frame size and does the anti-aliasing and scaling, so
+// these three controls would only confuse: they are removed (and the window shrinks) instead.
+// The lighter-settings switch only applies to the Low level, so it is shown only while Low is selected.
+bool Hidden(int id) {
+  if (id == kLowEnd && g_c[kQuality].sel != 1) return true;
+  // 720p is the only internal resolution of this release, so the choice is not offered.
+  if (id == kResolution) return true;
+  return g_c[kUpscaler].sel > 0 && (id == kSmaa || id == kFsr);
+}
 
 float RowHeight(const Ctl& c) { return c.kind == Kind::Toggle ? 46.f : 70.f; }
 
 void Layout() {
-  const float colw = (kBaseW - 2 * kMargin - kGap) / 2.f;
+  const float colw = (g_win_w - 2 * kMargin - kGap) / 2.f;
   float y[2] = {kHeaderH, kHeaderH};
   for (auto& card : g_cards) {
     float h = kTitleH + kPad * 0.4f;
-    for (int i : card.ctls) h += RowHeight(g_c[i]);
+    for (int i : card.ctls) h += Hidden(i) ? 0.f : RowHeight(g_c[i]);
     h += kPad * 0.6f;
     if (card.note) h += 46.f;
     card.rect = RectF(kMargin + card.column * (colw + kGap), y[card.column], colw, h);
     float cy = y[card.column] + kTitleH + kPad * 0.4f;
     for (int i : card.ctls) {
       Ctl& c = g_c[i];
+      if (Hidden(i)) { c.row = c.ctl = RectF(-100, -100, 0, 0); continue; }
       const float rh = RowHeight(c);
       c.row = RectF(card.rect.X + kPad, cy, colw - 2 * kPad, rh);
       if (c.kind == Kind::Toggle) {
@@ -436,12 +670,23 @@ void Layout() {
   const float content = bottom + kGap;
   g_content_h = content;
   const float bar_y = content + 2.f;
-  const float bw[3] = {160.f, 110.f, 130.f};
-  float x = kBaseW - kMargin;
-  for (int i = 2; i >= 0; --i) {
+  const float bw[4] = {150.f, 160.f, 110.f, 130.f};
+  float x = g_win_w - kMargin;
+  for (int i = 3; i >= 0; --i) {
     x -= bw[i];
     g_btn[i] = RectF(x, bar_y + 14.f, bw[i], 44.f);
     x -= 12.f;
+  }
+  // key bindings page: two columns of rows inside the same content area
+  {
+    const float colw2 = (g_win_w - 2 * kMargin - kGap) / 2.f;
+    const int half = (kBindCount + 1) / 2;
+    const float top = kHeaderH + 46.f;
+    const float rh = (content - top - kGap - 26.f) / float(half);
+    for (int i = 0; i < kBindCount; ++i) {
+      const int col = i / half, row = i % half;
+      g_bind_rect[i] = RectF(kMargin + col * (colw2 + kGap), top + row * rh, colw2, rh - 6.f);
+    }
   }
 }
 
@@ -489,6 +734,7 @@ RectF Scaled(const RectF& r) { return RectF(r.X * g_scale, r.Y * g_scale, r.Widt
 std::wstring SliderText(const Ctl& c) {
   wchar_t b[32];
   if (c.id == kSens) swprintf(b, 32, L"%d%%", int(c.val));
+  else if (c.id == kFov) swprintf(b, 32, L"%d deg", int(c.val));
   else swprintf(b, 32, L"%.1f", c.val);
   return b;
 }
@@ -519,7 +765,7 @@ void Paint(HDC hdc, int w, int h) {
     RectF box;
     g.MeasureString(chip, -1, &fSeg, PointF(0, 0), &measure, &box);
     const float cw = box.Width / S + 52.f;  // dot + padding on both sides
-    RectF cr = Scaled(RectF(kBaseW - kMargin - cw, 32, cw, 30));
+    RectF cr = Scaled(RectF(g_win_w - kMargin - cw, 32, cw, 30));
     FillRound(g, cr, 15 * S, g_game_found ? Color(255, 28, 52, 38) : Color(255, 60, 40, 28));
     SolidBrush dot(g_game_found ? kOk : kWarn);
     g.FillEllipse(&dot, cr.X + 13 * S, cr.Y + 11 * S, 8 * S, 8 * S);
@@ -527,8 +773,23 @@ void Paint(HDC hdc, int w, int h) {
          StringAlignmentNear, StringAlignmentCenter, false, false);
   }
 
+  if (g_page == 1) {
+    Text(g, L"KEY BINDINGS", fCard, Scaled(RectF(kMargin, kHeaderH + 8, 400, 26)), kMuted);
+    Text(g, L"Click an action, then press the key or mouse button. Right-click an action to add a second key. Esc cancels, Delete clears.",
+         fHint, Scaled(RectF(kMargin + 150, kHeaderH + 8, g_win_w - 2 * kMargin - 150, 26)), kMuted);
+    for (int i = 0; i < kBindCount; ++i) {
+      RectF r = Scaled(g_bind_rect[i]);
+      const bool hot = g_hover_bind == i, cap = g_capture == i;
+      FillRound(g, r, 10 * S, cap ? Color(255, 58, 38, 34) : (hot ? kTrackHover : kCard));
+      StrokeRound(g, r, 10 * S, cap ? kAccent : kCardLine);
+      Text(g, kBinds[i].label, fLabel, RectF(r.X + 14 * S, r.Y, r.Width * 0.5f - 14 * S, r.Height), kText);
+      Text(g, BindText(i), fSegBold, RectF(r.X + r.Width * 0.5f, r.Y, r.Width * 0.5f - 14 * S, r.Height),
+           cap ? kAccentHover : kWhite, StringAlignmentFar);
+    }
+  }
   // cards
   for (auto& card : g_cards) {
+    if (g_page == 1) break;
     RectF cr = Scaled(card.rect);
     FillRound(g, cr, 12 * S, kCard);
     StrokeRound(g, cr, 12 * S, kCardLine);
@@ -538,6 +799,7 @@ void Paint(HDC hdc, int w, int h) {
            kMuted, StringAlignmentNear, StringAlignmentFar, true);
     }
     for (int i : card.ctls) {
+      if (Hidden(i)) continue;
       Ctl& c = g_c[i];
       const RectF row = Scaled(c.row), ct = Scaled(c.ctl);
       const bool hot = g_hover_ctl == i;
@@ -561,7 +823,18 @@ void Paint(HDC hdc, int w, int h) {
             const bool over = hot && g_hover_seg == int(k);
             if (sel) FillRound(g, seg, 7 * S, over ? kAccentHover : kAccent);
             else if (over) FillRound(g, seg, 7 * S, kTrackHover);
-            Text(g, c.items[k], sel ? fSegBold : fSeg, seg, sel ? kWhite : kMuted, StringAlignmentCenter);
+            // A label that does not fit its segment gets a smaller font instead of being cut off.
+            float px = 13.f;
+            StringFormat mf;
+            mf.SetFormatFlags(StringFormatFlagsNoWrap);
+            for (; px > 9.f; px -= 0.5f) {
+              Font ft(&fam, px * S, sel ? FontStyleBold : FontStyleRegular, UnitPixel);
+              RectF bx;
+              g.MeasureString(c.items[k].c_str(), -1, &ft, PointF(0, 0), &mf, &bx);
+              if (bx.Width <= seg.Width - 8 * S) break;
+            }
+            Font fit(&fam, px * S, sel ? FontStyleBold : FontStyleRegular, UnitPixel);
+            Text(g, c.items[k], fit, seg, sel ? kWhite : kMuted, StringAlignmentCenter);
           }
         } else {
           const float t = float((c.val - c.vmin) / (c.vmax - c.vmin));
@@ -585,19 +858,34 @@ void Paint(HDC hdc, int w, int h) {
   std::wstring msg = g_status;
   Color mc = g_status_color;
   if (g_hover_ctl >= 0) { msg = g_c[g_hover_ctl].hint; mc = kMuted; }
-  else if (g_hover_btn == 0) { msg = L"Put every setting back to its default."; mc = kMuted; }
-  else if (g_hover_btn == 2) { msg = L"Save and start the game."; mc = kMuted; }
-  Text(g, msg, fHint, RectF(kMargin * S, fy + 8 * S, (g_btn[0].X - kMargin - 12) * S, (kFooterH - 16) * S), mc,
-       StringAlignmentNear, StringAlignmentCenter, true);
-  for (int i = 0; i < 3; ++i) {
+  else if (g_hover_btn == 0) { msg = g_page == 1 ? L"Back to the settings." : L"Choose the keys and mouse buttons for every action."; mc = kMuted; }
+  else if (g_hover_btn == 1) { msg = L"Put every setting back to its default."; mc = kMuted; }
+  else if (g_hover_btn == 3) { msg = L"Save and start the game."; mc = kMuted; }
+  else if (g_page == 1 && g_hover_bind >= 0) { msg = L"Click, then press the new key. Right-click adds a second key. Keys can only do one thing, so a key used elsewhere moves here."; mc = kMuted; }
+  {
+    // The window cannot be resized, so a long hint shrinks until it fits instead of being cut off.
+    const RectF fr(kMargin * S, fy + 8 * S, (g_btn[0].X - kMargin - 12) * S, (kFooterH - 16) * S);
+    StringFormat mfmt;
+    mfmt.SetTrimming(StringTrimmingNone);
+    float px = 12.5f;
+    for (; px > 9.f; px -= 0.5f) {
+      Font ft(&fam, px * S, FontStyleRegular, UnitPixel);
+      RectF bounds;
+      g.MeasureString(msg.c_str(), -1, &ft, RectF(0, 0, fr.Width, 0), &mfmt, &bounds);
+      if (bounds.Height <= fr.Height) break;
+    }
+    Font fit(&fam, px * S, FontStyleRegular, UnitPixel);
+    Text(g, msg, fit, fr, mc, StringAlignmentNear, StringAlignmentCenter, true, false);
+  }
+  for (int i = 0; i < 4; ++i) {
     RectF br = Scaled(g_btn[i]);
     const bool over = g_hover_btn == i, down = g_press_btn == i && over;
-    const bool disabled = i == 2 && !g_game_found;
-    Color fill = i == 2 ? (disabled ? kOff : (down ? Color(255, 200, 52, 30) : over ? kAccentHover : kAccent))
-                        : (i == 1 ? (down ? Color(255, 56, 62, 74) : over ? Color(255, 66, 73, 88) : Color(255, 50, 56, 68))
+    const bool disabled = i == 3 && !g_game_found;
+    Color fill = i == 3 ? (disabled ? kOff : (down ? Color(255, 200, 52, 30) : over ? kAccentHover : kAccent))
+                        : (i == 2 ? (down ? Color(255, 56, 62, 74) : over ? Color(255, 66, 73, 88) : Color(255, 50, 56, 68))
                                   : (over ? kTrackHover : kTrack));
     FillRound(g, br, 10 * S, fill);
-    Text(g, kBtnText[i], fBtn, br, disabled ? kMuted : kWhite, StringAlignmentCenter);
+    Text(g, i == 0 && g_page == 1 ? L"Back" : kBtnText[i], fBtn, br, disabled ? kMuted : kWhite, StringAlignmentCenter);
   }
 }
 
@@ -613,7 +901,9 @@ void MarkChanged() {
 
 int HitControl(float x, float y, int* seg) {
   *seg = -1;
+  if (g_page == 1) return -1;
   for (int i = 0; i < kCount; ++i) {
+    if (Hidden(i)) continue;
     Ctl& c = g_c[i];
     RectF r = Scaled(c.row);
     if (x < r.X || x > r.X + r.Width || y < r.Y || y > r.Y + r.Height) continue;
@@ -629,8 +919,17 @@ int HitControl(float x, float y, int* seg) {
 }
 
 int HitButton(float x, float y) {
-  for (int i = 0; i < 3; ++i) {
+  for (int i = 0; i < 4; ++i) {
     RectF r = Scaled(g_btn[i]);
+    if (x >= r.X && x <= r.X + r.Width && y >= r.Y && y <= r.Y + r.Height) return i;
+  }
+  return -1;
+}
+
+int HitBind(float x, float y) {
+  if (g_page != 1) return -1;
+  for (int i = 0; i < kBindCount; ++i) {
+    RectF r = Scaled(g_bind_rect[i]);
     if (x >= r.X && x <= r.X + r.Width && y >= r.Y && y <= r.Y + r.Height) return i;
   }
   return -1;
@@ -680,7 +979,19 @@ void DoReset() {
   SetStatus(L"Defaults restored.", kOk);
 }
 
-void Redraw() { InvalidateRect(g_hwnd, nullptr, FALSE); }
+void Redraw() {
+  if (!g_hwnd) return;
+  Layout();  // controls may have appeared or disappeared; the window height follows the content
+  RECT wr, cr;
+  GetWindowRect(g_hwnd, &wr);
+  GetClientRect(g_hwnd, &cr);
+  const LONG want = LONG(TotalHeight() * g_scale);
+  if (cr.bottom != want) {
+    SetWindowPos(g_hwnd, nullptr, 0, 0, wr.right - wr.left, (wr.bottom - wr.top) - cr.bottom + want,
+                 SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+  }
+  InvalidateRect(g_hwnd, nullptr, FALSE);
+}
 
 LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
   switch (m) {
@@ -709,8 +1020,9 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
       int seg;
       const int c = HitControl(x, y, &seg);
       const int b = HitButton(x, y);
-      if (c != g_hover_ctl || seg != g_hover_seg || b != g_hover_btn) {
-        g_hover_ctl = c; g_hover_seg = seg; g_hover_btn = b;
+      const int hb = HitBind(x, y);
+      if (c != g_hover_ctl || seg != g_hover_seg || b != g_hover_btn || hb != g_hover_bind) {
+        g_hover_ctl = c; g_hover_seg = seg; g_hover_btn = b; g_hover_bind = hb;
         Redraw();
       }
       TRACKMOUSEEVENT t{sizeof(t), TME_LEAVE, h, 0};
@@ -718,14 +1030,53 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
       return 0;
     }
     case WM_MOUSELEAVE:
-      g_hover_ctl = g_hover_seg = g_hover_btn = -1;
+      g_hover_ctl = g_hover_seg = g_hover_btn = g_hover_bind = -1;
       Redraw();
+      return 0;
+    case WM_RBUTTONDOWN:
+    case WM_MBUTTONDOWN:
+    case WM_XBUTTONDOWN: {
+      const float x = float(GET_X_LPARAM(l)), y = float(GET_Y_LPARAM(l));
+      if (g_page == 1 && g_capture >= 0) {
+        const char* name = m == WM_RBUTTONDOWN ? "RightMouseButton" : m == WM_MBUTTONDOWN ? "MiddleMouseButton"
+                           : (GET_XBUTTON_WPARAM(w) == XBUTTON1 ? "ThumbMouseButton" : "ThumbMouseButton2");
+        AssignKey(g_capture, name, g_capture_add);
+        g_capture = -1;
+        MarkChanged();
+        Redraw();
+        return m == WM_XBUTTONDOWN ? TRUE : 0;
+      }
+      if (m == WM_RBUTTONDOWN) {
+        const int hb = HitBind(x, y);
+        if (hb >= 0) { g_capture = hb; g_capture_add = true; g_capture_swallow = false; Redraw(); }
+      }
+      return m == WM_XBUTTONDOWN ? TRUE : 0;
+    }
+    case WM_MOUSEWHEEL:
+      if (g_page == 1 && g_capture >= 0) {
+        AssignKey(g_capture, GET_WHEEL_DELTA_WPARAM(w) > 0 ? "MouseScrollUp" : "MouseScrollDown", g_capture_add);
+        g_capture = -1;
+        MarkChanged();
+        Redraw();
+      }
       return 0;
     case WM_LBUTTONDOWN: {
       const float x = float(GET_X_LPARAM(l)), y = float(GET_Y_LPARAM(l));
       SetCapture(h);
+      if (g_page == 1 && g_capture >= 0 && !g_capture_swallow) {
+        AssignKey(g_capture, "LeftMouseButton", g_capture_add);
+        g_capture = -1;
+        MarkChanged();
+        Redraw();
+        return 0;
+      }
       const int b = HitButton(x, y);
       if (b >= 0) { g_press_btn = b; Redraw(); return 0; }
+      if (g_page == 1) {
+        const int hb = HitBind(x, y);
+        if (hb >= 0) { g_capture = hb; g_capture_add = false; g_capture_swallow = true; Redraw(); }
+        return 0;
+      }
       int seg;
       const int i = HitControl(x, y, &seg);
       if (i < 0) return 0;
@@ -747,6 +1098,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
       return 0;
     }
     case WM_LBUTTONUP: {
+      g_capture_swallow = false;
       ReleaseCapture();
       const float x = float(GET_X_LPARAM(l)), y = float(GET_Y_LPARAM(l));
       const int b = HitButton(x, y);
@@ -755,16 +1107,58 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
       g_drag = -1;
       Redraw();
       if (pressed >= 0 && pressed == b) {
-        if (b == 0) DoReset();
-        else if (b == 1) DoSave();
+        if (b == 0) { g_page = 1 - g_page; g_capture = -1; }
+        else if (b == 1) DoReset();
+        else if (b == 2) DoSave();
         else DoPlay();
         Redraw();
       }
       return 0;
     }
+    case WM_SYSKEYDOWN:
     case WM_KEYDOWN:
-      if (w == VK_ESCAPE) PostMessageW(h, WM_CLOSE, 0, 0);
+      if (g_page == 1 && g_capture >= 0) {
+        if (w == VK_ESCAPE) { g_capture = -1; Redraw(); return 0; }
+        if (w == VK_DELETE) {
+          g_bind_keys[g_capture].clear();
+          g_bind_dirty = true;
+          g_capture = -1;
+          MarkChanged();
+          Redraw();
+          return 0;
+        }
+        const std::string name = KeyFromMessage(w, l);
+        if (!name.empty()) {
+          AssignKey(g_capture, name, g_capture_add);
+          g_capture = -1;
+          MarkChanged();
+          Redraw();
+        }
+        return 0;
+      }
+      if (m == WM_SYSKEYDOWN) return DefWindowProcW(h, m, w, l);
+      if (w == VK_ESCAPE && g_page == 1) { g_page = 0; Redraw(); }
+      else if (w == VK_ESCAPE) PostMessageW(h, WM_CLOSE, 0, 0);
       else if (w == VK_RETURN) { if (GetKeyState(VK_CONTROL) < 0) DoPlay(); else { DoSave(); Redraw(); } }
+      return 0;
+    case WM_GETMINMAXINFO: {
+      // Wider is allowed (labels get more room); the height follows the content and is fixed.
+      RECT wr, cr;
+      GetWindowRect(h, &wr);
+      GetClientRect(h, &cr);
+      const int ncw = (wr.right - wr.left) - cr.right, nch = (wr.bottom - wr.top) - cr.bottom;
+      auto* mm = reinterpret_cast<MINMAXINFO*>(l);
+      mm->ptMinTrackSize.x = LONG(kMinW * g_scale) + ncw;
+      mm->ptMaxTrackSize.x = LONG(kMaxW * g_scale) + ncw;
+      mm->ptMinTrackSize.y = mm->ptMaxTrackSize.y = LONG(TotalHeight() * g_scale) + nch;
+      return 0;
+    }
+    case WM_SIZE:
+      if (w != SIZE_MINIMIZED && g_scale > 0) {
+        g_win_w = (std::max)(kMinW, (std::min)(kMaxW, float(LOWORD(l)) / g_scale));
+        Layout();
+        Redraw();
+      }
       return 0;
     case WM_DPICHANGED: {
       g_scale = float(HIWORD(w)) / 96.f;
@@ -868,17 +1262,18 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
   HDC sdc = GetDC(nullptr);
   g_scale = float(GetDeviceCaps(sdc, LOGPIXELSX)) / 96.f;
   ReleaseDC(nullptr, sdc);
-  RECT rc{0, 0, LONG(kBaseW * g_scale), LONG(TotalHeight() * g_scale)};
-  const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+  RECT rc{0, 0, LONG(g_win_w * g_scale), LONG(TotalHeight() * g_scale)};
+  const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_THICKFRAME;
   AdjustWindowRect(&rc, style, FALSE);
   const int ww = rc.right - rc.left, wh = rc.bottom - rc.top;
   g_hwnd = CreateWindowExW(0, wc.lpszClassName, L"Gears of War: Judgment - Settings", style,
                            (GetSystemMetrics(SM_CXSCREEN) - ww) / 2, (GetSystemMetrics(SM_CYSCREEN) - wh) / 2,
                            ww, wh, nullptr, nullptr, inst, nullptr);
   const UINT dpi = GetDpiForWindow(g_hwnd);
-  if (dpi && dpi != UINT(g_scale * 96.f + 0.5f)) {
+  if (dpi) {
+    // Always size from the real frame metrics at this DPI (the resize frame is thicker than the plain one).
     g_scale = float(dpi) / 96.f;
-    RECT r2{0, 0, LONG(kBaseW * g_scale), LONG(TotalHeight() * g_scale)};
+    RECT r2{0, 0, LONG(g_win_w * g_scale), LONG(TotalHeight() * g_scale)};
     AdjustWindowRectExForDpi(&r2, style, FALSE, 0, dpi);
     SetWindowPos(g_hwnd, nullptr, 0, 0, r2.right - r2.left, r2.bottom - r2.top, SWP_NOMOVE | SWP_NOZORDER);
   }
