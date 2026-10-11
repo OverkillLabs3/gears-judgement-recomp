@@ -126,7 +126,7 @@ buttons.
 - **Menus have no mouse cursor.** The game was not designed for one; the mouse moves the selection.
 - **The settings menu (F4) pauses SMAA/FSR while it is open**, so the picture looks softer until you close it.
 - Thin, distant geometry (antennas, wires) can shimmer, because there is no temporal anti-aliasing.
-- The game renders at 720p on every quality level (1440p was removed because it was too heavy for most PCs).
+- The game renders at 720p by default. 1440p is available in Graphics Settings as an experimental, demanding option (fast graphics card needed; can drop below 60 fps).
 - DLSS and FSR 3.1/4 temporal upscaling is not in this release. It flickered while moving at the render sizes the game can draw, so it is paused until that is fixed.
 - Windows only.
 

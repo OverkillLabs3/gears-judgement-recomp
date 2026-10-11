@@ -249,6 +249,15 @@ It never raises the level by itself. The decision is remembered in
 for that one setting, and automatic lowering is then off for the resolution you set. The log line starting
 with `QUALITY` says what was detected and why.
 
+## Language
+
+Graphics Settings > Game language lists every language that came with the game files: English, French, Spanish,
+Korean, Chinese, Polish, Czech, Hungarian, Danish, Dutch, Norwegian and Finnish. The console had no language id for
+Czech, Hungarian, Danish, Dutch, Norwegian and Finnish, so the game picks those from the country; the launcher sets
+`user_language` and `user_country` together (Spanish uses Mexico, the Latin American text on the disc). German,
+Italian, Portuguese, Russian and Japanese were not on the disc this port was made from (another release of the
+game may have them). Takes effect on the next start.
+
 ## Shader and pipeline cache
 
 The graphics card has to compile a pipeline for every combination of shaders and states the game

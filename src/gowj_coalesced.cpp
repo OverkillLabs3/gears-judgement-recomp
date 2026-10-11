@@ -36,7 +36,7 @@ namespace rex::glue {
 
 namespace {
 
-constexpr int kVersion = 12;  // bump when the edit definitions change (invalidates cached copies)
+constexpr int kVersion = 13;  // bump when the edit definitions change (invalidates cached copies)
 
 // ----------------------------------------------------------------------------------------------
 // Coalesced bundle: BE u32 file count; per file: name, section count; per section: name, key count;
@@ -168,6 +168,25 @@ std::u16string W(const std::string& s) {
 }
 bool EndsWith(const std::u16string& s, const std::u16string& suffix) {
   return s.size() >= suffix.size() && s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+std::u16string LowerW(std::u16string s) {
+  for (char16_t& c : s)
+    if (c >= u'A' && c <= u'Z') c = char16_t(c - u'A' + u'a');
+  return s;
+}
+
+// The English bundle names its text files "GearGameUI.int"; every other language bundle names the same
+// file "geargameui.FRA", "geargameui.KOR" and so on (and the case differs). An edit written for the
+// ".int" name therefore also applies to the bundle's own language file.
+bool FileMatches(const std::u16string& name, const std::string& edit_file, const std::u16string& locale) {
+  const std::u16string n = LowerW(name), e = LowerW(W(edit_file));
+  if (EndsWith(n, e)) return true;
+  if (!locale.empty() && EndsWith(e, u".int")) {
+    const std::u16string localized = e.substr(0, e.size() - 3) + LowerW(locale);
+    return EndsWith(n, localized);
+  }
+  return false;
 }
 
 bool ReadAll(const std::filesystem::path& p, std::vector<uint8_t>* out) {
@@ -364,7 +383,7 @@ int ReplaceInlineGlyphs(std::u16string* v, const std::vector<std::pair<char16_t,
   return n;
 }
 
-int Apply(std::vector<IniFile>* files, const std::vector<Edit>& edits) {
+int Apply(std::vector<IniFile>* files, const std::vector<Edit>& edits, const std::u16string& locale) {
   int changed = 0;
   // glyph character -> label, from the ControllerFont table (before it is edited) and the new labels
   std::vector<std::pair<char16_t, std::u16string>> glyph_labels;
@@ -380,7 +399,7 @@ int Apply(std::vector<IniFile>* files, const std::vector<Edit>& edits) {
       }
     if (!wanted.empty()) {
       for (IniFile& f : *files) {
-        if (!EndsWith(f.name, W(kUI))) continue;
+        if (!FileMatches(f.name, kUI, locale)) continue;
         for (Section& sec : f.sections) {
           if (sec.name != u"ControllerFont") continue;
           for (Entry& en : sec.entries) {
@@ -397,7 +416,7 @@ int Apply(std::vector<IniFile>* files, const std::vector<Edit>& edits) {
   }
   for (const Edit& ed : edits) {
     for (IniFile& f : *files) {
-      if (!EndsWith(f.name, W(ed.file))) continue;
+      if (!FileMatches(f.name, ed.file, locale)) continue;
       for (Section& s : f.sections) {
         if (s.name != W(ed.section)) continue;
         if (ed.kind == Edit::kAppend) {
@@ -617,7 +636,8 @@ CoalescedResult PrepareCoalescedOverrides(const std::filesystem::path& game_root
       std::vector<uint8_t> bytes;
       std::vector<IniFile> files;
       if (!ReadAll(src, &bytes) || !Parse(bytes, &files)) continue;  // unknown layout: leave alone
-      const int changed = Apply(&files, edits);
+      const std::u16string locale = W(name.substr(10, name.size() - 14));  // Coalesced_XXX.bin -> XXX
+      const int changed = Apply(&files, edits, locale);
       if (changed == 0) continue;  // this locale file has none of the sections
       const std::vector<uint8_t> patched = Serialize(files);
       {

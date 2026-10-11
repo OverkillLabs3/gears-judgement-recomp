@@ -549,6 +549,51 @@ void ProbeWrap(PPCContext& ctx, uint8_t* base) {
       ctx.r3.u64 = 0;
     }
   }
+  // Fresh installs: the runtime content manager has no package record for the
+  // shim-served GearsCheckpoint, so GetCreator fails PATH_NOT_FOUND and the title
+  // skips reading a save that is sitting right there ("corrupted" / starts over).
+  // Answer as the console does for a save the profile created.
+  if (I == 2 && ContentFixEnabled() && ctx.r3.u32 != 0 && creator_out &&
+      Readable(base + creator_out, 4) && delete_data && Readable(base + delete_data, kContentDataSize)) {
+    const char* nm = reinterpret_cast<const char*>(base + delete_data + kFileNameOffset);
+    if (strnlen(nm, kFileNameSize) == 15 && !std::memcmp(nm, "GearsCheckpoint", 15)) {
+      bool has_files = false;
+      {
+        std::filesystem::path dir;
+        {
+          std::lock_guard lock(g_mount_mu);
+          dir = g_checkpoint_dir;
+        }
+        std::error_code ec;
+        for (std::filesystem::directory_iterator it(dir, ec), end; !ec && it != end;
+             it.increment(ec)) {
+          std::error_code fec;
+          if (it->is_regular_file(fec) && it->file_size(fec) > 0) { has_files = true; break; }
+        }
+      }
+      if (has_files) {
+        const uint32_t one = __builtin_bswap32(1);
+        std::memcpy(base + creator_out, &one, 4);
+        if (xuid_out && Readable(base + xuid_out, 8)) {
+          const uint64_t x = __builtin_bswap64(0xB13EBABEBABEBABEull);
+          std::memcpy(base + xuid_out, &x, 8);
+        }
+        const uint32_t ovl = ctx.r7.u32;
+        if (ovl && Readable(base + ovl, 20)) {
+          const uint32_t zero = 0;
+          std::memcpy(base + ovl + 4, &zero, 4);
+          std::memcpy(base + ovl, &zero, 4);
+          ctx.r3.u64 = 997;
+        } else {
+          ctx.r3.u64 = 0;
+        }
+        static std::atomic<int> cb{16};
+        if (cb.fetch_sub(1, std::memory_order_relaxed) > 0) {
+          REXLOG_WARN("CONTENTFIX GetCreator GearsCheckpoint -> creator (runtime had no package)");
+        }
+      }
+    }
+  }
   if (I == 2 && creator_out && Readable(base + creator_out, 4)) {
     uint32_t is_creator = 0;
     std::memcpy(&is_creator, base + creator_out, 4);

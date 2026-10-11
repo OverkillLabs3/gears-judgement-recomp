@@ -165,6 +165,24 @@ class GowjApp : public rex::ReXApp {
   // user OUTSIDE the block always wins and is never touched (returns false = unmanaged).
   // force_auto: an upscaler is on, so the frame buffers follow the screen. A resolution the player
   // picked is set aside (not deleted) and comes back when the upscaler is turned off.
+  // The player's own draw_resolution_scale_x line (outside the managed block), or 1.
+  static int ReadUserScale(const std::filesystem::path& cfg) {
+    std::ifstream in(cfg, std::ios::binary);
+    std::string line;
+    bool in_block = false;
+    while (std::getline(in, line)) {
+      if (line.rfind("# >>> gowj auto quality", 0) == 0) { in_block = true; continue; }
+      if (in_block) { if (line.rfind("# <<< gowj auto quality", 0) == 0) in_block = false; continue; }
+      const size_t b = line.find_first_not_of(" 	");
+      if (b != std::string::npos && line.compare(b, 24, "draw_resolution_scale_x ") == 0) {
+        const size_t eq = line.find('=');
+        if (eq != std::string::npos) return std::atoi(line.c_str() + eq + 1);
+      }
+    }
+    return 1;
+  }
+  int user_scale_ = 1;
+
   static bool EnsureAutoResolutionScale(const std::filesystem::path& cfg, int scale, bool force_auto = false) {
     static constexpr const char* kSuspended = "#gowj-suspended# ";
     static constexpr const char* kBegin = "# >>> gowj auto quality (managed block";
@@ -385,9 +403,9 @@ class GowjApp : public rex::ReXApp {
         env_or("GOWJ_RES_SCALE", std::to_string(quality_plan_.scale).c_str());
     int32_t scale = 1;
     try {
-      // 720p is the only internal resolution of this release: 1440p was too heavy for most PCs. Only the
-      // developer override GOWJ_RES_SCALE can ask for more.
-      scale = force_scale ? std::clamp(std::stoi(scale_s), 1, 4) : 1;
+      // 720p is the default. 1440p (2x) is an experimental, demanding choice the player makes in the
+      // launcher; it is the only larger size that renders correctly.
+      scale = force_scale ? std::clamp(std::stoi(scale_s), 1, 4) : std::clamp(user_scale_, 1, 2);
     } catch (...) {
       scale = 1;
     }
@@ -647,7 +665,8 @@ class GowjApp : public rex::ReXApp {
 #endif
     if (!vfs_overrides.empty()) _putenv_s("GOWJ_VFS_OVERRIDES", vfs_overrides.c_str());
     rex::glue::QualityStartTuner(
-        quality_plan_, EnsureAutoResolutionScale(paths.config_path, quality_plan_.scale, true));  // true: a leftover draw_resolution_scale line is set aside, 720p only
+        quality_plan_, EnsureAutoResolutionScale(paths.config_path, quality_plan_.scale, false));
+    user_scale_ = ReadUserScale(paths.config_path);
     // Nothing logged here: SetupEnvironment runs paths *before* logging, so
     // REXLOG_* calls in this hook are dropped. Paths and the config load are
     // reported from OnPostInitLogging instead.

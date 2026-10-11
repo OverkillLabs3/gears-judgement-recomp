@@ -176,7 +176,7 @@ enum Id {
   kSmaa, kFsr, kSharpness, kGrain, kBlur,
   kLimit, kVrr,
   kSens, kInvert,
-  kPrompts, kFov, kShake, kDrawDist, kSkipLogos,
+  kPrompts, kFov, kShake, kDrawDist, kSkipLogos, kLanguage,
   kCount
 };
 enum class Kind { Segmented, Toggle, Slider };
@@ -193,6 +193,7 @@ struct Ctl {
   const wchar_t* unit = L"";
   std::wstring last;  // what the game actually applied on its last start (from cvars.txt)
   bool dirty = false;
+  int rows = 1;  // a segmented control with many items wraps onto this many lines
   RectF row{}, ctl{};
 };
 
@@ -346,15 +347,23 @@ std::string KeyFromMessage(WPARAM w, LPARAM l) {
   return {};
 }
 
+// Game language choices, in the order of the Game language row. The console had no language id for
+// Czech, Hungarian, Danish, Dutch, Norwegian and Finnish: the game takes those from the country.
+// Spanish needs the Mexican country for the Latin American text that ships with the game.
+struct LangChoice { const char* lang; const char* country; };
+const LangChoice kLangs[] = {{"1", ""},  {"4", ""},  {"5", "71"}, {"7", ""},  {"8", ""},  {"11", ""},
+                             {"1", "23"}, {"1", "42"}, {"1", "25"}, {"1", "74"}, {"1", "75"}, {"1", "32"}};
+constexpr int kLangCount = int(sizeof(kLangs) / sizeof(kLangs[0]));
+
 void InitControls() {
   g_c[kQuality] = {kQuality, Kind::Segmented, L"Quality level",
                    L"Picking a level sets resolution, texture filtering and SMAA below to match it. Auto picks from your graphics card and lowers itself if 60 fps is not held. Low: no SMAA, 4x, and lighter game settings (see below). Medium: SMAA, 8x. High: SMAA, 16x. The game renders at 720p on every level."};
   g_c[kLowEnd] = {kLowEnd, Kind::Toggle, L"Low level: lighter game settings",
                   L"Only used on the Low level. Switches off the game's dynamic lights, shadows, decals, bloom, depth of field, ambient occlusion and other post effects to run on weak graphics cards and handhelds. It is applied to a copy of your own game file in the cache; your game folder is never changed. Medium and High are not affected."};
   g_c[kQuality].items = {L"Auto", L"Low", L"Medium", L"High"};
-  g_c[kResolution] = {kResolution, Kind::Segmented, L"Internal resolution",
-                      L"The resolution the game renders at before it is scaled to your screen. Auto follows the quality level. 2x is sharper and needs a much faster graphics card."};
-  g_c[kResolution].items = {L"Auto", L"1x  720p", L"2x  1440p"};
+  g_c[kResolution] = {kResolution, Kind::Segmented, L"Internal resolution (experimental)",
+                      L"The resolution the game renders at before it is scaled to your screen. 720p is the default. 1440p is experimental and very demanding: it needs a fast graphics card, can drop below 60 fps in heavy scenes, and may show small visual glitches."};
+  g_c[kResolution].items = {L"Auto", L"720p", L"1440p (demanding)"};
   g_c[kFiltering] = {kFiltering, Kind::Segmented, L"Texture filtering",
                      L"Keeps ground and walls sharp at a slant. Auto follows the quality level."};
   g_c[kFiltering].items = {L"Auto", L"4x", L"8x", L"16x"};
@@ -377,7 +386,7 @@ void InitControls() {
                  L"A steady limit looks smoother than a fast but uneven frame rate. Unlocked also turns vsync off, so frames are not held to the display refresh. In the game, F8 switches between this limit and unlocked."};
   g_c[kLimit].items = {L"30", L"60", L"90", L"120", L"Unlocked"};
   g_c[kVrr] = {kVrr, Kind::Toggle, L"Variable refresh rate", L"For G-Sync and FreeSync monitors. Turn on when the frame limit is Unlocked."};
-  g_c[kSens] = {kSens, Kind::Slider, L"Mouse sensitivity", L"How far the camera turns per mouse movement. In the game, F11 and F12 lower and raise it."};
+  g_c[kSens] = {kSens, Kind::Slider, L"Mouse sensitivity", L"How far the camera turns per mouse movement. In the game, F11 and F12 lower and raise it, and Insert releases the mouse."};
   g_c[kSens].vmin = 25; g_c[kSens].vmax = 300; g_c[kSens].step = 5; g_c[kSens].unit = L"%";
   g_c[kInvert] = {kInvert, Kind::Toggle, L"Invert vertical look", L"Moving the mouse up looks down."};
   g_c[kPrompts] = {kPrompts, Kind::Segmented, L"Menu prompts",
@@ -388,6 +397,11 @@ void InitControls() {
   g_c[kDrawDist].items = {L"Auto", L"Short", L"Normal", L"Far"};
   g_c[kFov] = {kFov, Kind::Slider, L"Field of view", L"How wide the everyday camera sees, in degrees. The game's own value is 80. Aiming keeps its own zoom."};
   g_c[kFov].vmin = 60; g_c[kFov].vmax = 120; g_c[kFov].step = 5; g_c[kFov].unit = L"deg";
+  g_c[kLanguage] = {kLanguage, Kind::Segmented, L"Game language",
+                    L"The language of the game's text and menus. Every language that came with your game files is listed (German, Italian, Portuguese, Russian and Japanese were not on the disc this was made from). Takes effect the next time the game starts."};
+  g_c[kLanguage].items = {L"English", L"French", L"Spanish", L"Korean", L"Chinese", L"Polish"};
+  g_c[kLanguage].rows = 2;
+  g_c[kLanguage].items.insert(g_c[kLanguage].items.end(), {L"Czech", L"Hungarian", L"Danish", L"Dutch", L"Norwegian", L"Finnish"});
   g_c[kSkipLogos] = {kSkipLogos, Kind::Toggle, L"Skip startup logo movie",
                      L"Skips the logo movie that plays when the game starts, which saves about 15 seconds per launch."};
   g_c[kShake] = {kShake, Kind::Toggle, L"Roadie-run camera shake", L"The shaking of the camera while sprinting. Off holds it steady."};
@@ -405,8 +419,8 @@ void InitControls() {
         {L"QUALITY", {kQuality, kResolution, kFiltering, kDrawDist, kLowEnd, kFullscreen, kSkipLogos}, 0},
         {L"IMAGE", {kSmaa, kFsr, kSharpness, kGrain, kBlur}, 0},
         {L"FRAME RATE", {kLimit, kVrr}, 1, L"In the game, F8 lifts and restores this limit, and F9 shows an FPS counter. Choose Unlocked here to also turn vsync off."},
-        {L"MOUSE", {kSens, kInvert}, 1, L"In the game, F11 and F12 lower and raise the sensitivity, and Insert releases the mouse."},
-        {L"COMFORT AND PROMPTS", {kPrompts, kFov, kShake}, 1},
+        {L"MOUSE", {kSens, kInvert}, 1},
+        {L"COMFORT AND PROMPTS", {kLanguage, kPrompts, kFov, kShake}, 1},
     };
   }
 }
@@ -470,6 +484,19 @@ void LoadControls() {
   g_c[kFov].val = GetValue("gowj_fov", &v) && atoi(v.c_str()) > 0 ? atoi(v.c_str()) : 80;
   g_c[kShake].on = !(GetValue("gowj_no_camera_shake", &v) && v == "true");
   g_c[kSkipLogos].on = GetValue("gowj_skip_logos", &v) && v == "true";
+  {
+    // The game picks its text from the console language id (user_language) and, for the languages the
+    // console had no id for, from the country (user_country): see kLangs.
+    g_c[kLanguage].sel = 0;
+    std::string lang = "1", country;
+    GetValue("user_language", &lang);
+    GetValue("user_country", &country);
+    if (lang == "10") lang = "8";  // the other Chinese id
+    for (int k = 1; k < kLangCount; ++k) {
+      if (lang == kLangs[k].lang && (!kLangs[k].country[0] || country == kLangs[k].country)) g_c[kLanguage].sel = k;
+    }
+  }
+
   LoadBinds();
   for (auto& c : g_c) c.dirty = false;
 }
@@ -532,6 +559,14 @@ void ApplyControls() {
         break;
       case kShake: SetValue("gowj_no_camera_shake", b(!c.on)); break;
       case kSkipLogos: SetValue("gowj_skip_logos", b(c.on)); break;
+      case kLanguage: {
+        if (c.sel <= 0 || c.sel >= kLangCount) { RemoveKey("user_language"); RemoveKey("user_country"); }
+        else {
+          SetValue("user_language", kLangs[c.sel].lang);
+          if (kLangs[c.sel].country[0]) SetValue("user_country", kLangs[c.sel].country);
+          else RemoveKey("user_country");
+        }
+      } break;
       case kDrawDist: {
         static const char* n[] = {"auto", "0.5", "1.0", "1.5"};
         if (c.sel == 0) RemoveKey("gowj_draw_distance");
@@ -606,7 +641,7 @@ const Color kBg(255, 16, 18, 22), kCard(255, 24, 27, 33), kCardLine(255, 38, 42,
     kTrackHover(255, 45, 50, 60), kAccent(255, 224, 64, 38), kAccentHover(255, 240, 84, 58),
     kOff(255, 63, 69, 82), kWhite(255, 245, 246, 248), kOk(255, 90, 200, 120), kWarn(255, 240, 170, 60);
 
-constexpr float kMinW = 900.f, kMaxW = 1700.f, kMargin = 24.f, kGap = 18.f, kHeaderH = 92.f, kFooterH = 96.f;
+constexpr float kMinW = 900.f, kMaxW = 6000.f, kMargin = 24.f, kGap = 18.f, kHeaderH = 92.f, kFooterH = 96.f;
 constexpr float kPad = 22.f, kTitleH = 44.f;
 
 HWND g_hwnd = nullptr;
@@ -619,18 +654,18 @@ Color g_status_color = kMuted;
 RectF g_btn[4];  // key bindings, reset, save, play
 const wchar_t* kBtnText[4] = {L"Key bindings", L"Reset to defaults", L"Save", L"Play"};
 float g_content_h = 0;
+float g_min_h = 0;   // height that fits the content
+float g_user_h = 0;  // height the player dragged the window to (0 = natural)
 
 // With DLSS or FSR on, the upscaler sets the frame size and does the anti-aliasing and scaling, so
 // these three controls would only confuse: they are removed (and the window shrinks) instead.
 // The lighter-settings switch only applies to the Low level, so it is shown only while Low is selected.
 bool Hidden(int id) {
   if (id == kLowEnd && g_c[kQuality].sel != 1) return true;
-  // 720p is the only internal resolution of this release, so the choice is not offered.
-  if (id == kResolution) return true;
   return g_c[kUpscaler].sel > 0 && (id == kSmaa || id == kFsr);
 }
 
-float RowHeight(const Ctl& c) { return c.kind == Kind::Toggle ? 46.f : 70.f; }
+float RowHeight(const Ctl& c) { return c.kind == Kind::Toggle ? 46.f : 70.f + 36.f * float(c.rows - 1); }
 
 void Layout() {
   const float colw = (g_win_w - 2 * kMargin - kGap) / 2.f;
@@ -650,7 +685,7 @@ void Layout() {
       if (c.kind == Kind::Toggle) {
         c.ctl = RectF(c.row.X + c.row.Width - 46.f, cy + 10.f, 46.f, 26.f);
       } else if (c.kind == Kind::Segmented) {
-        c.ctl = RectF(c.row.X, cy + 26.f, c.row.Width, 34.f);
+        c.ctl = RectF(c.row.X, cy + 26.f, c.row.Width, 34.f + 36.f * float(c.rows - 1));
       } else {
         c.ctl = RectF(c.row.X, cy + 26.f, c.row.Width - 64.f, 34.f);
       }
@@ -659,7 +694,9 @@ void Layout() {
     y[card.column] += h + kGap;
   }
   // Both columns end at the same height: the last card of the shorter column takes the difference.
-  const float bottom = (std::max)(y[0], y[1]) - kGap;
+  float bottom = (std::max)(y[0], y[1]) - kGap;
+  g_min_h = bottom + kGap + kFooterH;
+  if (g_user_h > g_min_h) bottom += g_user_h - g_min_h;
   for (int col = 0; col < 2; ++col) {
     for (int k = int(g_cards.size()) - 1; k >= 0; --k) {
       if (g_cards[k].column != col) continue;
@@ -816,9 +853,10 @@ void Paint(HDC hdc, int w, int h) {
         }
         if (c.kind == Kind::Segmented) {
           FillRound(g, ct, 9 * S, kTrack);
-          const float sw = ct.Width / float(c.items.size());
+          const int per = (int(c.items.size()) + c.rows - 1) / c.rows;
+          const float sw = ct.Width / float(per), sh = ct.Height / float(c.rows);
           for (size_t k = 0; k < c.items.size(); ++k) {
-            RectF seg(ct.X + sw * k + 3 * S, ct.Y + 3 * S, sw - 6 * S, ct.Height - 6 * S);
+            RectF seg(ct.X + sw * float(int(k) % per) + 3 * S, ct.Y + sh * float(int(k) / per) + 3 * S, sw - 6 * S, sh - 6 * S);
             const bool sel = int(k) == c.sel;
             const bool over = hot && g_hover_seg == int(k);
             if (sel) FillRound(g, seg, 7 * S, over ? kAccentHover : kAccent);
@@ -910,7 +948,10 @@ int HitControl(float x, float y, int* seg) {
     if (c.kind == Kind::Segmented) {
       RectF ct = Scaled(c.ctl);
       if (y >= ct.Y && y <= ct.Y + ct.Height && x >= ct.X && x <= ct.X + ct.Width) {
-        *seg = (std::min)(int((x - ct.X) / (ct.Width / c.items.size())), int(c.items.size()) - 1);
+        const int per = (int(c.items.size()) + c.rows - 1) / c.rows;
+        const int col = (std::min)(int((x - ct.X) / (ct.Width / per)), per - 1);
+        const int rw = (std::min)(int((y - ct.Y) / (ct.Height / c.rows)), c.rows - 1);
+        *seg = (std::min)(rw * per + col, int(c.items.size()) - 1);
       }
     }
     return i;
@@ -1150,12 +1191,17 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
       auto* mm = reinterpret_cast<MINMAXINFO*>(l);
       mm->ptMinTrackSize.x = LONG(kMinW * g_scale) + ncw;
       mm->ptMaxTrackSize.x = LONG(kMaxW * g_scale) + ncw;
-      mm->ptMinTrackSize.y = mm->ptMaxTrackSize.y = LONG(TotalHeight() * g_scale) + nch;
+      mm->ptMinTrackSize.y = LONG(g_min_h * g_scale) + nch;
+      mm->ptMaxTrackSize.y = 6000;
       return 0;
     }
     case WM_SIZE:
       if (w != SIZE_MINIMIZED && g_scale > 0) {
         g_win_w = (std::max)(kMinW, (std::min)(kMaxW, float(LOWORD(l)) / g_scale));
+        {
+          const float hh = float(HIWORD(l)) / g_scale;
+          g_user_h = hh > g_min_h + 1.f ? hh : 0.f;
+        }
         Layout();
         Redraw();
       }
